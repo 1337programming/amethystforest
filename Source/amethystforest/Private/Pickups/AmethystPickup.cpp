@@ -108,7 +108,7 @@ void AAmethystPickup::OnPickedUp()
     
     if (PickupSound && PickedUpBy)
     {
-        UGameplayStatics::PlaySoundAttached(PickupSound, PickedUpBy->GetRootComponent());
+        UGameplayStatics::SpawnSoundAttached(PickupSound, PickedUpBy->GetRootComponent());
     }
     
     OnPickedUpEvent();

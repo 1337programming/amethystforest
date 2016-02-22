@@ -496,7 +496,7 @@ void AAmethystCharacter::SpawnDefaultInventory()
 			if (DefaultInventoryClasses[i])
 			{
 				FActorSpawnParameters SpawnInfo;
-				SpawnInfo.bNoCollisionFail = true;
+                SpawnInfo.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 				AAmethystWeapon* NewWeapon = GetWorld()->SpawnActor<AAmethystWeapon>(DefaultInventoryClasses[i], SpawnInfo);
 				AddWeapon(NewWeapon);
 
@@ -662,7 +662,7 @@ void AAmethystCharacter::SetTargeting(bool bNewTargeting)
 
 	if (TargetingSound)
 	{
-		UGameplayStatics::PlaySoundAttached(TargetingSound, GetRootComponent());
+		UGameplayStatics::SpawnSoundAttached(TargetingSound, GetRootComponent());
 	}
 
 	if (Role < ROLE_Authority)
@@ -713,7 +713,7 @@ void AAmethystCharacter::UpdateRunSounds(bool bNewRunning)
 	{
 		if (!RunLoopAC && RunLoopSound)
 		{
-			RunLoopAC = UGameplayStatics::PlaySoundAttached(RunLoopSound, GetRootComponent());
+			RunLoopAC = UGameplayStatics::SpawnSoundAttached(RunLoopSound, GetRootComponent());
 			if (RunLoopAC)
 			{
 				RunLoopAC->bAutoDestroy = false;
@@ -734,7 +734,7 @@ void AAmethystCharacter::UpdateRunSounds(bool bNewRunning)
 
 		if (RunStopSound)
 		{
-			UGameplayStatics::PlaySoundAttached(RunStopSound, GetRootComponent());
+			UGameplayStatics::SpawnSoundAttached(RunStopSound, GetRootComponent());
 		}
 	}
 }
@@ -1004,7 +1004,7 @@ void AAmethystCharacter::Tick(float DeltaSeconds)
 	{
 		if ((this->Health > 0 && this->Health < this->GetMaxHealth() * LowHealthPercentage) && (!LowHealthWarningPlayer || !LowHealthWarningPlayer->IsPlaying()))
 		{
-			LowHealthWarningPlayer = UGameplayStatics::PlaySoundAttached(LowHealthSound, GetRootComponent(),
+			LowHealthWarningPlayer = UGameplayStatics::SpawnSoundAttached(LowHealthSound, GetRootComponent(),
 				NAME_None, FVector(ForceInit), EAttachLocation::KeepRelativeOffset, true);
 			LowHealthWarningPlayer->SetVolumeMultiplier(0.0f);
 		}

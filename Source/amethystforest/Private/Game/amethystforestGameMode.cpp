@@ -50,7 +50,7 @@ void AamethystforestGameMode::SetAllowBots(bool bInAllowBots, int32 InMaxBots)
 
 void AamethystforestGameMode::InitGame(const FString& MapName, const FString& Options, FString& ErrorMessage)
 {
-    const int32 BotsCountOptionValue = GetIntOption(Options, GetBotsCountOptionName(), 0);
+    const int32 BotsCountOptionValue = UGameplayStatics::GetIntOption(Options, GetBotsCountOptionName(), 0);
     SetAllowBots(BotsCountOptionValue > 0 ? true : false, BotsCountOptionValue);
     
     Super::InitGame(MapName, Options, ErrorMessage);
@@ -201,7 +201,8 @@ class AAmethystBot* AamethystforestGameMode::SpawnBot(FVector SpawnLocation, FRo
     if (BotPawnClass)
     {
         FActorSpawnParameters SpawnInfo;
-        SpawnInfo.bNoCollisionFail = true;
+        SpawnInfo.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+        //SpawnInfo.bNoCollisionFail = true;
         AAmethystBot* Bot = GetWorld()->SpawnActor<AAmethystBot>(BotPawnClass, SpawnLocation, SpawnRotation, SpawnInfo);
         if (Bot)
         {

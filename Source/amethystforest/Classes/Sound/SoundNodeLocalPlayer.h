@@ -19,7 +19,7 @@ class USoundNodeLocalPlayer : public USoundNode
     //virtual FString GetUniqueString() const override;
      
 #if WITH_EDITOR
-    virtual FString GetInputPinName(int32 PinIndex) const override;
+    virtual FText GetInputPinName(int32 PinIndex) const override;
 #endif
     // End USoundNode interface.
 };
