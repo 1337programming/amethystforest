@@ -29,11 +29,11 @@
 
 # Unreal
 *.umap
-*.uproject
 amethystforest/Intermediate/
 amethystforest/Saved/
 Saved/
 Intermediate/
+Binaries
 
 #Intermediates
 Intermediate/*

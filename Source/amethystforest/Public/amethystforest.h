@@ -7,7 +7,7 @@
 
 
 #include "Engine.h"
-#include "Slate.h"
+#include "SlateBasics.h"
 #include "Classes/AmethystGameInstance.h"
 #include "Classes/AmethystGameUserSettings.h"
 #include "Classes/Player/AmethystCharacter.h"
