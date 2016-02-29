@@ -1,25 +1,23 @@
-// Fill out your copyright notice in the Description page of Project Settings.
+// Copyright 1998-2015 Epic Games, Inc. All Rights Reserved.
 
 #pragma once
 
-// Copyright 1998-2015 Epic Games, Inc. All Rights Reserved.
-
 #include "AmethystTypes.h"
-#include "AmethystGameViewportClient.generated.h"
+#include "AmethystForestViewportClient.generated.h"
 
 class SAmethystConfirmationDialog;
 
-struct FAmethystGameLoadingScreenBrush : public FSlateDynamicImageBrush, public FGCObject
+struct FAmethystForestLoadingScreenBrush : public FSlateDynamicImageBrush, public FGCObject
 {
-	FAmethystGameLoadingScreenBrush(const FName InTextureName, const FVector2D& InImageSize)
-		: FSlateDynamicImageBrush(InTextureName, InImageSize)
+	FAmethystForestLoadingScreenBrush( const FName InTextureName, const FVector2D& InImageSize )
+		: FSlateDynamicImageBrush( InTextureName, InImageSize )
 	{
-		ResourceObject = LoadObject<UObject>(NULL, *InTextureName.ToString());
+		ResourceObject = LoadObject<UObject>( NULL, *InTextureName.ToString() );
 	}
 
 	virtual void AddReferencedObjects(FReferenceCollector& Collector)
 	{
-		if (ResourceObject)
+		if( ResourceObject )
 		{
 			Collector.AddReferencedObject(ResourceObject);
 		}
@@ -32,7 +30,7 @@ public:
 	SLATE_BEGIN_ARGS(SAmethystLoadingScreen) {}
 	SLATE_END_ARGS()
 
-		void Construct(const FArguments& InArgs);
+	void Construct(const FArguments& InArgs);
 
 private:
 	EVisibility GetLoadIndicatorVisibility() const
@@ -44,17 +42,17 @@ private:
 	TSharedPtr<FSlateDynamicImageBrush> LoadingScreenBrush;
 };
 
-UCLASS(Within = Engine, transient, config = Engine)
-class UAmethystGameViewportClient : public UGameViewportClient
+UCLASS(Within=Engine, transient, config=Engine)
+class UAmethystForestViewportClient : public UGameViewportClient
 {
 	GENERATED_UCLASS_BODY()
 
 public:
 
-	// start UGameViewportClient interface
-	void NotifyPlayerAdded(int32 PlayerIndex, ULocalPlayer* AddedPlayer) override;
-	void AddViewportWidgetContent(TSharedRef<class SWidget> ViewportContent, const int32 ZOrder = 0) override;
-	void RemoveViewportWidgetContent(TSharedRef<class SWidget> ViewportContent) override;
+ 	// start UGameViewportClient interface
+ 	void NotifyPlayerAdded( int32 PlayerIndex, ULocalPlayer* AddedPlayer ) override;
+	void AddViewportWidgetContent( TSharedRef<class SWidget> ViewportContent, const int32 ZOrder = 0 ) override;
+	void RemoveViewportWidgetContent( TSharedRef<class SWidget> ViewportContent ) override;
 
 	void ShowDialog(TWeakObjectPtr<ULocalPlayer> PlayerOwner, EAmethystDialogType::Type DialogType, const FText& Message, const FText& Confirm, const FText& Cancel, const FOnClicked& OnConfirm, const FOnClicked& OnCancel);
 	void HideDialog();
@@ -70,7 +68,7 @@ public:
 	TSharedPtr<SAmethystConfirmationDialog> GetDialogWidget() { return DialogWidget; }
 
 	//FTicker Funcs
-	virtual void Tick(float DeltaSeconds) override;
+	virtual void Tick(float DeltaSeconds) override;	
 
 #if WITH_EDITOR
 	virtual void DrawTransition(class UCanvas* Canvas) override;

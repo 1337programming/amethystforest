@@ -1,107 +1,107 @@
-// Fill out your copyright notice in the Description page of Project Settings.
+// Copyright 1998-2015 Epic Games, Inc. All Rights Reserved.
 
-#include "amethystforest.h"
-#include "AmethystGameViewportClient.h"
-//#include "SAmethystConfirmationDialog.h"
+#include "AmethystForest.h"
+#include "AmethystForestViewportClient.h"
+#include "SAmethystConfirmationDialog.h"
 #include "SSafeZone.h"
 #include "SThrobber.h"
-#include "Classes/Player/AmethystLocalPlayer.h"
+#include "Player/AmethystLocalPlayer.h"
 
-UAmethystGameViewportClient::UAmethystGameViewportClient(const FObjectInitializer& ObjectInitializer)
+UAmethystForestViewportClient::UAmethystForestViewportClient(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
 {
 	SetSuppressTransitionMessage(true);
 }
 
-void UAmethystGameViewportClient::NotifyPlayerAdded(int32 PlayerIndex, ULocalPlayer* AddedPlayer)
+void UAmethystForestViewportClient::NotifyPlayerAdded(int32 PlayerIndex, ULocalPlayer* AddedPlayer)
 {
 	Super::NotifyPlayerAdded(PlayerIndex, AddedPlayer);
 
-	UAmethystLocalPlayer* const AmethystLP = Cast<UAmethystLocalPlayer>(AddedPlayer);
-	if (AmethystLP)
-	{
-		AmethystLP->LoadPersistentUser();
-	}
+ 	UAmethystLocalPlayer* const AmethystLP = Cast<UAmethystLocalPlayer>(AddedPlayer);
+ 	if (AmethystLP)
+ 	{
+ 		AmethystLP->LoadPersistentUser();
+ 	}
 }
 
-void UAmethystGameViewportClient::AddViewportWidgetContent(TSharedRef<class SWidget> ViewportContent, const int32 ZOrder)
+void UAmethystForestViewportClient::AddViewportWidgetContent( TSharedRef<class SWidget> ViewportContent, const int32 ZOrder )
 {
-	UE_LOG(LogPlayerManagement, Log, TEXT("UAmethystGameViewportClient::AddViewportWidgetContent: %p"), &ViewportContent.Get());
+	UE_LOG( LogPlayerManagement, Log, TEXT( "UAmethystForestViewportClient::AddViewportWidgetContent: %p" ), &ViewportContent.Get() );
 
-	if ((DialogWidget.IsValid() || LoadingScreenWidget.IsValid()) && ViewportContent != DialogWidget && ViewportContent != LoadingScreenWidget)
+	if ( ( DialogWidget.IsValid() || LoadingScreenWidget.IsValid() ) && ViewportContent != DialogWidget && ViewportContent != LoadingScreenWidget )
 	{
 		// Add to hidden list, and don't show until we hide the dialog widget
-		HiddenViewportContentStack.AddUnique(ViewportContent);
+		HiddenViewportContentStack.AddUnique( ViewportContent );
 		return;
 	}
 
-	if (ViewportContentStack.Contains(ViewportContent))
+	if ( ViewportContentStack.Contains( ViewportContent ) )
 	{
 		return;
 	}
 
-	ViewportContentStack.AddUnique(ViewportContent);
+	ViewportContentStack.AddUnique( ViewportContent );
 
-	Super::AddViewportWidgetContent(ViewportContent, 0);
+	Super::AddViewportWidgetContent( ViewportContent, 0 );
 }
 
-void UAmethystGameViewportClient::RemoveViewportWidgetContent(TSharedRef<class SWidget> ViewportContent)
+void UAmethystForestViewportClient::RemoveViewportWidgetContent( TSharedRef<class SWidget> ViewportContent )
 {
-	UE_LOG(LogPlayerManagement, Log, TEXT("UAmethystGameViewportClient::RemoveViewportWidgetContent: %p"), &ViewportContent.Get());
+	UE_LOG( LogPlayerManagement, Log, TEXT( "UAmethystForestViewportClient::RemoveViewportWidgetContent: %p" ), &ViewportContent.Get()  );
 
-	ViewportContentStack.Remove(ViewportContent);
-	HiddenViewportContentStack.Remove(ViewportContent);
+	ViewportContentStack.Remove( ViewportContent );
+	HiddenViewportContentStack.Remove( ViewportContent );
 
-	Super::RemoveViewportWidgetContent(ViewportContent);
+	Super::RemoveViewportWidgetContent( ViewportContent );
 }
 
-void UAmethystGameViewportClient::HideExistingWidgets()
+void UAmethystForestViewportClient::HideExistingWidgets()
 {
-	check(HiddenViewportContentStack.Num() == 0);
+	check( HiddenViewportContentStack.Num() == 0 );
 
 	TArray<TSharedRef<class SWidget>> CopyOfViewportContentStack = ViewportContentStack;
 
-	for (int32 i = ViewportContentStack.Num() - 1; i >= 0; i--)
+	for ( int32 i = ViewportContentStack.Num() - 1; i >= 0; i-- )
 	{
-		RemoveViewportWidgetContent(ViewportContentStack[i]);
+		RemoveViewportWidgetContent( ViewportContentStack[i] );
 	}
 
 	HiddenViewportContentStack = CopyOfViewportContentStack;
 }
 
-void UAmethystGameViewportClient::ShowExistingWidgets()
+void UAmethystForestViewportClient::ShowExistingWidgets()
 {
 	// We shouldn't have any visible widgets at this point
-	check(ViewportContentStack.Num() == 0);
+	check( ViewportContentStack.Num() == 0 );
 
 	// Unhide all of the previously hidden widgets
-	for (int32 i = 0; i < HiddenViewportContentStack.Num(); i++)
+	for ( int32 i = 0; i < HiddenViewportContentStack.Num(); i++ )
 	{
-		AddViewportWidgetContent(HiddenViewportContentStack[i]);
+		AddViewportWidgetContent( HiddenViewportContentStack[i] );
 	}
 
-	check(ViewportContentStack.Num() == HiddenViewportContentStack.Num());
+	check( ViewportContentStack.Num() == HiddenViewportContentStack.Num() );
 
 	// Done with these
 	HiddenViewportContentStack.Empty();
 }
 
-void UAmethystGameViewportClient::ShowDialog(TWeakObjectPtr<ULocalPlayer> PlayerOwner, EAmethystDialogType::Type DialogType, const FText& Message, const FText& Confirm, const FText& Cancel, const FOnClicked& OnConfirm, const FOnClicked& OnCancel)
+void UAmethystForestViewportClient::ShowDialog(TWeakObjectPtr<ULocalPlayer> PlayerOwner, EAmethystDialogType::Type DialogType, const FText& Message, const FText& Confirm, const FText& Cancel, const FOnClicked& OnConfirm, const FOnClicked& OnCancel)
 {
-	UE_LOG(LogPlayerManagement, Log, TEXT("UAmethystGameViewportClient::ShowDialog..."));
+	UE_LOG( LogPlayerManagement, Log, TEXT( "UAmethystForestViewportClient::ShowDialog..." ) );
 
-	if (DialogWidget.IsValid())
+	if ( DialogWidget.IsValid() )
 	{
 		return;	// Already showing a dialog box
 	}
 
 	// Hide all existing widgets
-	if (!LoadingScreenWidget.IsValid())
+	if ( !LoadingScreenWidget.IsValid() )
 	{
 		HideExistingWidgets();
 	}
 
-	/**DialogWidget = SNew(SAmethystConfirmationDialog)
+	DialogWidget = SNew( SAmethystConfirmationDialog )
 		.PlayerOwner(PlayerOwner)
 		.DialogType(DialogType)
 		.MessageText(Message)
@@ -109,67 +109,67 @@ void UAmethystGameViewportClient::ShowDialog(TWeakObjectPtr<ULocalPlayer> Player
 		.CancelText(Cancel)
 		.OnConfirmClicked(OnConfirm)
 		.OnCancelClicked(OnCancel);
-		**/
-	if (LoadingScreenWidget.IsValid())
+
+	if ( LoadingScreenWidget.IsValid() )
 	{
 		// Can't show dialog while loading screen is visible
-		HiddenViewportContentStack.Add(DialogWidget.ToSharedRef());
+		HiddenViewportContentStack.Add( DialogWidget.ToSharedRef() );
 	}
 	else
 	{
-		AddViewportWidgetContent(DialogWidget.ToSharedRef());
+		AddViewportWidgetContent( DialogWidget.ToSharedRef() );
 
 		// Remember what widget currently has focus
 		OldFocusWidget = FSlateApplication::Get().GetKeyboardFocusedWidget();
 
 		// Force focus to the dialog widget
-		FSlateApplication::Get().SetKeyboardFocus(DialogWidget, EFocusCause::SetDirectly);
+		FSlateApplication::Get().SetKeyboardFocus( DialogWidget, EFocusCause::SetDirectly );
 	}
 }
 
-void UAmethystGameViewportClient::HideDialog()
+void UAmethystForestViewportClient::HideDialog()
 {
-	UE_LOG(LogPlayerManagement, Log, TEXT("UAmethystGameViewportClient::HideDialog. DialogWidget: %p, OldFocusWidget: %p"), DialogWidget.Get(), OldFocusWidget.Get());
+	UE_LOG( LogPlayerManagement, Log, TEXT( "UAmethystForestViewportClient::HideDialog. DialogWidget: %p, OldFocusWidget: %p" ), DialogWidget.Get(), OldFocusWidget.Get() );
 
-	if (DialogWidget.IsValid())
+	if ( DialogWidget.IsValid() )
 	{
 		const bool bRestoreOldFocus = OldFocusWidget.IsValid() && FSlateApplication::Get().GetKeyboardFocusedWidget() == DialogWidget;
 
 		// Hide the dialog widget
-		RemoveViewportWidgetContent(DialogWidget.ToSharedRef());
+		RemoveViewportWidgetContent( DialogWidget.ToSharedRef() );
 
 		// Destroy the dialog widget
 		DialogWidget = NULL;
 
-		if (!LoadingScreenWidget.IsValid())
+		if ( !LoadingScreenWidget.IsValid() )
 		{
 			ShowExistingWidgets();
 		}
 
 		// Restore focus to last widget (but only if the dialog currently has focus still)
-		if (bRestoreOldFocus)
+		if ( bRestoreOldFocus )
 		{
-			FSlateApplication::Get().SetKeyboardFocus(OldFocusWidget, EFocusCause::SetDirectly);
+			FSlateApplication::Get().SetKeyboardFocus( OldFocusWidget, EFocusCause::SetDirectly );
 		}
 
 		OldFocusWidget = NULL;
 	}
 }
 
-void UAmethystGameViewportClient::ShowLoadingScreen()
+void UAmethystForestViewportClient::ShowLoadingScreen()
 {
-	if (LoadingScreenWidget.IsValid())
+	if ( LoadingScreenWidget.IsValid() )
 	{
 		return;
 	}
 
-	if (DialogWidget.IsValid())
+	if ( DialogWidget.IsValid() )
 	{
 		// Hide the dialog widget (loading screen takes priority)
-		check(!HiddenViewportContentStack.Contains(DialogWidget.ToSharedRef()));
-		check(ViewportContentStack.Contains(DialogWidget.ToSharedRef()));
-		RemoveViewportWidgetContent(DialogWidget.ToSharedRef());
-		HiddenViewportContentStack.Add(DialogWidget.ToSharedRef());
+		check( !HiddenViewportContentStack.Contains( DialogWidget.ToSharedRef() ) );
+		check( ViewportContentStack.Contains( DialogWidget.ToSharedRef() ) );
+		RemoveViewportWidgetContent( DialogWidget.ToSharedRef() );
+		HiddenViewportContentStack.Add( DialogWidget.ToSharedRef() );
 	}
 	else
 	{
@@ -177,64 +177,64 @@ void UAmethystGameViewportClient::ShowLoadingScreen()
 		HideExistingWidgets();
 	}
 
-	LoadingScreenWidget = SNew(SAmethystLoadingScreen);
+	LoadingScreenWidget = SNew( SAmethystLoadingScreen );
 
-	AddViewportWidgetContent(LoadingScreenWidget.ToSharedRef());
+	AddViewportWidgetContent( LoadingScreenWidget.ToSharedRef() );
 }
 
-void UAmethystGameViewportClient::HideLoadingScreen()
+void UAmethystForestViewportClient::HideLoadingScreen()
 {
-	if (!LoadingScreenWidget.IsValid())
+	if ( !LoadingScreenWidget.IsValid() )
 	{
 		return;
 	}
 
-	RemoveViewportWidgetContent(LoadingScreenWidget.ToSharedRef());
+	RemoveViewportWidgetContent( LoadingScreenWidget.ToSharedRef() );
 
 	LoadingScreenWidget = NULL;
 
 	// Show the dialog widget if we need to
-	if (DialogWidget.IsValid())
+	if ( DialogWidget.IsValid() )
 	{
-		check(HiddenViewportContentStack.Contains(DialogWidget.ToSharedRef()));
-		check(!ViewportContentStack.Contains(DialogWidget.ToSharedRef()));
-		HiddenViewportContentStack.Remove(DialogWidget.ToSharedRef());
-		AddViewportWidgetContent(DialogWidget.ToSharedRef());
+		check( HiddenViewportContentStack.Contains( DialogWidget.ToSharedRef() ) );
+		check( !ViewportContentStack.Contains( DialogWidget.ToSharedRef() ) );
+		HiddenViewportContentStack.Remove( DialogWidget.ToSharedRef() );
+		AddViewportWidgetContent( DialogWidget.ToSharedRef() );
 	}
 	else
 	{
 		ShowExistingWidgets();
 	}
 }
-/*
-EAmethystDialogType::Type UAmethystGameViewportClient::GetDialogType() const
+
+EAmethystDialogType::Type UAmethystForestViewportClient::GetDialogType() const
 {
 	return (DialogWidget.IsValid() ? DialogWidget->DialogType : EAmethystDialogType::None);
 }
 
-TWeakObjectPtr<ULocalPlayer> UAmethystGameViewportClient::GetDialogOwner() const
+TWeakObjectPtr<ULocalPlayer> UAmethystForestViewportClient::GetDialogOwner() const
 {
 	return (DialogWidget.IsValid() ? DialogWidget->PlayerOwner : nullptr);
 }
-*/
-void UAmethystGameViewportClient::Tick(float DeltaSeconds)
+
+void UAmethystForestViewportClient::Tick(float DeltaSeconds)
 {
-	if (DialogWidget.IsValid() && !LoadingScreenWidget.IsValid())
+	if ( DialogWidget.IsValid() && !LoadingScreenWidget.IsValid() )
 	{
 		// Make sure the dialog widget always has focus
-		if (FSlateApplication::Get().GetKeyboardFocusedWidget() != DialogWidget)
+		if ( FSlateApplication::Get().GetKeyboardFocusedWidget() != DialogWidget )
 		{
 			// Remember which widget had focus before we override it
 			OldFocusWidget = FSlateApplication::Get().GetKeyboardFocusedWidget();
 
 			// Force focus back to dialog
-			FSlateApplication::Get().SetKeyboardFocus(DialogWidget, EFocusCause::SetDirectly);
+			FSlateApplication::Get().SetKeyboardFocus( DialogWidget, EFocusCause::SetDirectly );
 		}
 	}
 }
 
 #if WITH_EDITOR
-void UAmethystGameViewportClient::DrawTransition(UCanvas* Canvas)
+void UAmethystForestViewportClient::DrawTransition(UCanvas* Canvas)
 {
 	if (GetOuterUEngine() != NULL)
 	{
@@ -246,7 +246,7 @@ void UAmethystGameViewportClient::DrawTransition(UCanvas* Canvas)
 			break;
 		case TT_WaitingToConnect:
 			DrawTransitionMessage(Canvas, NSLOCTEXT("GameViewportClient", "Waitingtoconnect", "Waiting to connect...").ToString());
-			break;
+			break;	
 		}
 	}
 }
@@ -257,31 +257,31 @@ void SAmethystLoadingScreen::Construct(const FArguments& InArgs)
 	static const FName LoadingScreenName(TEXT("/Game/UI/Menu/LoadingScreen.LoadingScreen"));
 
 	//since we are not using game styles here, just load one image
-	LoadingScreenBrush = MakeShareable(new FAmethystGameLoadingScreenBrush(LoadingScreenName, FVector2D(1920, 1080)));
+	LoadingScreenBrush = MakeShareable( new FAmethystForestLoadingScreenBrush( LoadingScreenName, FVector2D(1920,1080) ) );
 
 	ChildSlot
+	[
+		SNew(SOverlay)
+		+SOverlay::Slot()
+		.HAlign(HAlign_Fill)
+		.VAlign(VAlign_Fill)
 		[
-			SNew(SOverlay)
-			+ SOverlay::Slot()
-			.HAlign(HAlign_Fill)
-			.VAlign(VAlign_Fill)
+			SNew(SImage)
+			.Image(LoadingScreenBrush.Get())
+		]
+		+SOverlay::Slot()
+		.HAlign(HAlign_Fill)
+		.VAlign(VAlign_Fill)
+		[
+			SNew(SSafeZone)
+			.VAlign(VAlign_Bottom)
+			.HAlign(HAlign_Right)
+			.Padding(10.0f)
+			.IsTitleSafe(true)
 			[
-				SNew(SImage)
-				.Image(LoadingScreenBrush.Get())
+				SNew(SThrobber)
+				.Visibility(this, &SAmethystLoadingScreen::GetLoadIndicatorVisibility)
 			]
-			+ SOverlay::Slot()
-				.HAlign(HAlign_Fill)
-				.VAlign(VAlign_Fill)
-				[
-					SNew(SSafeZone)
-					.VAlign(VAlign_Bottom)
-					.HAlign(HAlign_Right)
-					.Padding(10.0f)
-					.IsTitleSafe(true)
-					[
-						SNew(SThrobber)
-						.Visibility(this, &SAmethystLoadingScreen::GetLoadIndicatorVisibility)
-					]
-				]
-		];
+		]
+	];
 }

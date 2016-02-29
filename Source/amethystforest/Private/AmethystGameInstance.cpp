@@ -1,17 +1,23 @@
+﻿// Copyright 1998-2015 Epic Games, Inc. All Rights Reserved.
 
-#include "amethystforest.h"
+/*=============================================================================
+	AmethystForestInstance.cpp
+=============================================================================*/
 
-#include "Classes/AmethystGameInstance.h"
-#include "UI/Style/AmethystStyle.h"
-#include "UI/Style/AmethystMenuItemWidgetStyle.h"
-#include "UI/Menu/AmethystMainMenu.h"
-#include "UI/Menu/AmethystWelcomeMenu.h"
-#include "UI/Menu/AmethystMessageMenu.h"
-#include "Classes/Game/AmethystGameState.h"
-#include "Classes/Player/amethystforestPlayerController.h"
-#include "Classes/Player/AmethystPlayerController_Menu.h"
-#include "AmethystGameViewportClient.h"
-//#include "AmethystGameLoadingScreen.h"
+#include "AmethystForest.h"
+#include "AmethystForestInstance.h"
+#include "AmethystMainMenu.h"
+#include "AmethystWelcomeMenu.h"
+#include "AmethystMessageMenu.h"
+#include "AmethystForestLoadingScreen.h"
+#include "OnlineKeyValuePair.h"
+#include "AmethystStyle.h"
+#include "AmethystMenuItemWidgetStyle.h"
+#include "AmethystForestViewportClient.h"
+#include "Player/AmethystPlayerController_Menu.h"
+#include "Online/AmethystPlayerState.h"
+#include "Online/AmethystForestSession.h"
+
 
 void SAmethystWaitDialog::Construct(const FArguments& InArgs)
 {
@@ -36,7 +42,7 @@ void SAmethystWaitDialog::Construct(const FArguments& InArgs)
 				.BorderBackgroundColor(FLinearColor(1.0f, 1.0f, 1.0f, 1.0f))
 				[
 					SNew(STextBlock)
-					.TextStyle(FAmethystStyle::Get(), "AmethystGame.MenuHeaderTextStyle")
+					.TextStyle(FAmethystStyle::Get(), "AmethystForest.MenuHeaderTextStyle")
 					.ColorAndOpacity(this, &SAmethystWaitDialog::GetTextColor)
 					.Text(InArgs._MessageText)
 					.WrapTextAt(500.0f)
@@ -62,7 +68,7 @@ FSlateColor SAmethystWaitDialog::GetTextColor() const
 	return FLinearColor(FColor(155, 164, 182, FMath::Clamp((int32)(fAlpha * 255.0f), 0, 255)));
 }
 
-namespace AmethystGameInstanceState
+namespace AmethystForestInstanceState
 {
 	const FName None = FName(TEXT("None"));
 	const FName PendingInvite = FName(TEXT("PendingInvite"));
@@ -73,39 +79,66 @@ namespace AmethystGameInstanceState
 }
 
 
-UAmethystGameInstance::UAmethystGameInstance(const FObjectInitializer& ObjectInitializer)
+UAmethystForestInstance::UAmethystForestInstance(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
+	, bIsOnline(true) // Default to online
 	, bIsLicensed(true) // Default to licensed (should have been checked by OS on boot)
 {
-	CurrentState = AmethystGameInstanceState::None;
+	CurrentState = AmethystForestInstanceState::None;
 }
 
-void UAmethystGameInstance::Init()
+void UAmethystForestInstance::Init()
 {
 	Super::Init();
 
 	IgnorePairingChangeForControllerId = -1;
+	CurrentConnectionStatus = EOnlineServerConnectionStatus::Connected;
 
-	FCoreDelegates::ApplicationWillDeactivateDelegate.AddUObject(this, &UAmethystGameInstance::HandleAppWillDeactivate);
+	// game requires the ability to ID users.
+	const auto OnlineSub = IOnlineSubsystem::Get();
+	check(OnlineSub);
+	const auto IdentityInterface = OnlineSub->GetIdentityInterface();
+	check(IdentityInterface.IsValid());
 
-	FCoreDelegates::ApplicationWillEnterBackgroundDelegate.AddUObject(this, &UAmethystGameInstance::HandleAppSuspend);
-	FCoreDelegates::ApplicationHasEnteredForegroundDelegate.AddUObject(this, &UAmethystGameInstance::HandleAppResume);
+	const auto SessionInterface = OnlineSub->GetSessionInterface();
+	check(SessionInterface.IsValid());
 
-	FCoreDelegates::OnSafeFrameChangedEvent.AddUObject(this, &UAmethystGameInstance::HandleSafeFrameChanged);
-	FCoreDelegates::OnControllerConnectionChange.AddUObject(this, &UAmethystGameInstance::HandleControllerConnectionChange);
-	FCoreDelegates::ApplicationLicenseChange.AddUObject(this, &UAmethystGameInstance::HandleAppLicenseUpdate);
+	// bind any OSS delegates we needs to handle
+	for (int i = 0; i < MAX_LOCAL_PLAYERS; ++i)
+	{
+		IdentityInterface->AddOnLoginStatusChangedDelegate_Handle(i, FOnLoginStatusChangedDelegate::CreateUObject(this, &UAmethystForestInstance::HandleUserLoginChanged));
+	}
 
-	FCoreUObjectDelegates::PreLoadMap.AddUObject(this, &UAmethystGameInstance::OnPreLoadMap);
-	FCoreUObjectDelegates::PostLoadMap.AddUObject(this, &UAmethystGameInstance::OnPostLoadMap);
+	IdentityInterface->AddOnControllerPairingChangedDelegate_Handle(FOnControllerPairingChangedDelegate::CreateUObject(this, &UAmethystForestInstance::HandleControllerPairingChanged));
 
-	FCoreUObjectDelegates::PostDemoPlay.AddUObject(this, &UAmethystGameInstance::OnPostDemoPlay);
+	FCoreDelegates::ApplicationWillDeactivateDelegate.AddUObject(this, &UAmethystForestInstance::HandleAppWillDeactivate);
+
+	FCoreDelegates::ApplicationWillEnterBackgroundDelegate.AddUObject(this, &UAmethystForestInstance::HandleAppSuspend);
+	FCoreDelegates::ApplicationHasEnteredForegroundDelegate.AddUObject(this, &UAmethystForestInstance::HandleAppResume);
+
+	FCoreDelegates::OnSafeFrameChangedEvent.AddUObject(this, &UAmethystForestInstance::HandleSafeFrameChanged);
+	FCoreDelegates::OnControllerConnectionChange.AddUObject(this, &UAmethystForestInstance::HandleControllerConnectionChange);
+	FCoreDelegates::ApplicationLicenseChange.AddUObject(this, &UAmethystForestInstance::HandleAppLicenseUpdate);
+
+	FCoreUObjectDelegates::PreLoadMap.AddUObject(this, &UAmethystForestInstance::OnPreLoadMap);
+	FCoreUObjectDelegates::PostLoadMap.AddUObject(this, &UAmethystForestInstance::OnPostLoadMap);
+
+	FCoreUObjectDelegates::PostDemoPlay.AddUObject(this, &UAmethystForestInstance::OnPostDemoPlay);
+
+	bPendingEnableSplitscreen = false;
+
+	OnlineSub->AddOnConnectionStatusChangedDelegate_Handle( FOnConnectionStatusChangedDelegate::CreateUObject( this, &UAmethystForestInstance::HandleNetworkConnectionStatusChanged ) );
+
+	SessionInterface->AddOnSessionFailureDelegate_Handle( FOnSessionFailureDelegate::CreateUObject( this, &UAmethystForestInstance::HandleSessionFailure ) );
+	
+	OnEndSessionCompleteDelegate = FOnEndSessionCompleteDelegate::CreateUObject(this, &UAmethystForestInstance::OnEndSessionComplete);
 
 	// Register delegate for ticker callback
-	TickDelegate = FTickerDelegate::CreateUObject(this, &UAmethystGameInstance::Tick);
+	TickDelegate = FTickerDelegate::CreateUObject(this, &UAmethystForestInstance::Tick);
 	TickDelegateHandle = FTicker::GetCoreTicker().AddTicker(TickDelegate);
 }
 
-void UAmethystGameInstance::Shutdown()
+void UAmethystForestInstance::Shutdown()
 {
 	Super::Shutdown();
 
@@ -113,35 +146,154 @@ void UAmethystGameInstance::Shutdown()
 	FTicker::GetCoreTicker().RemoveTicker(TickDelegateHandle);
 }
 
-void UAmethystGameInstance::OnPreLoadMap()
+void UAmethystForestInstance::OnSessionUserInviteAccepted(
+	const bool							bWasSuccess, 
+	const int32							ControllerId, 
+	TSharedPtr< const FUniqueNetId > 	UserId, 
+	const FOnlineSessionSearchResult &	InviteResult
+)
 {
+	UE_LOG( LogOnline, Verbose, TEXT( "HandleSessionUserInviteAccepted: bSuccess: %d, ControllerId: %d, User: %s" ), bWasSuccess, ControllerId, UserId.IsValid() ? *UserId->ToString() : TEXT( "NULL ") );
 
+	if ( !bWasSuccess )
+	{
+		return;
+	}
+
+	if ( !InviteResult.IsValid() )
+	{
+		UE_LOG(LogOnline, Warning, TEXT( "Invite accept returned no search result." ) );
+		return;
+	}
+
+	if ( !UserId.IsValid() )
+	{
+		UE_LOG(LogOnline, Warning, TEXT( "Invite accept returned no user." ) );
+		return;
+	}
+
+	// Set the pending invite, and then go to the initial screen, which is where we will process it
+	PendingInvite.ControllerId					= ControllerId;
+	PendingInvite.UserId						= UserId;
+	PendingInvite.InviteResult					= InviteResult;
+	PendingInvite.bPrivilegesCheckedAndAllowed	= false;
+
+	GotoState( AmethystForestInstanceState::PendingInvite );
 }
 
-void UAmethystGameInstance::OnPostLoadMap()
+void UAmethystForestInstance::HandleNetworkConnectionStatusChanged(  EOnlineServerConnectionStatus::Type LastConnectionStatus, EOnlineServerConnectionStatus::Type ConnectionStatus )
+{
+	UE_LOG( LogOnlineGame, Warning, TEXT( "UAmethystForestInstance::HandleNetworkConnectionStatusChanged: %s" ), EOnlineServerConnectionStatus::ToString( ConnectionStatus ) );
+
+#if SHOOTER_CONSOLE_UI
+	// If we are disconnected from server, and not currently at (or heading to) the welcome screen
+	// then display a message on consoles
+	if (	bIsOnline && 
+			PendingState != AmethystForestInstanceState::WelcomeScreen &&
+			CurrentState != AmethystForestInstanceState::WelcomeScreen &&
+			ConnectionStatus != EOnlineServerConnectionStatus::Connected )
+	{
+		UE_LOG( LogOnlineGame, Log, TEXT( "UAmethystForestInstance::HandleNetworkConnectionStatusChanged: Going to main menu" ) );
+
+		// Display message on consoles
+#if PLATFORM_XBOXONE
+		const FText ReturnReason	= NSLOCTEXT( "NetworkFailures", "ServiceUnavailable", "Connection to Xbox LIVE has been lost." );
+#elif PLATFORM_PS4
+		const FText ReturnReason	= NSLOCTEXT( "NetworkFailures", "ServiceUnavailable", "Connection to \"PSN\" has been lost." );
+#else
+		const FText ReturnReason	= NSLOCTEXT( "NetworkFailures", "ServiceUnavailable", "Connection has been lost." );
+#endif
+		const FText OKButton		= NSLOCTEXT( "DialogButtons", "OKAY", "OK" );
+		
+		ShowMessageThenGotoState( ReturnReason, OKButton, FText::GetEmpty(), AmethystForestInstanceState::MainMenu );
+	}
+
+	CurrentConnectionStatus = ConnectionStatus;
+#endif
+}
+
+void UAmethystForestInstance::HandleSessionFailure( const FUniqueNetId& NetId, ESessionFailure::Type FailureType )
+{
+	UE_LOG( LogOnlineGame, Warning, TEXT( "UAmethystForestInstance::HandleSessionFailure: %u" ), (uint32)FailureType );
+
+#if SHOOTER_CONSOLE_UI
+	// If we are not currently at (or heading to) the welcome screen then display a message on consoles
+	if (	bIsOnline && 
+			PendingState != AmethystForestInstanceState::WelcomeScreen &&
+			CurrentState != AmethystForestInstanceState::WelcomeScreen )
+	{
+		UE_LOG( LogOnlineGame, Log, TEXT( "UAmethystForestInstance::HandleSessionFailure: Going to main menu" ) );
+
+		// Display message on consoles
+#if PLATFORM_XBOXONE
+		const FText ReturnReason	= NSLOCTEXT( "NetworkFailures", "ServiceUnavailable", "Connection to Xbox LIVE has been lost." );
+#elif PLATFORM_PS4
+		const FText ReturnReason	= NSLOCTEXT( "NetworkFailures", "ServiceUnavailable", "Connection to PSN has been lost." );
+#else
+		const FText ReturnReason	= NSLOCTEXT( "NetworkFailures", "ServiceUnavailable", "Connection has been lost." );
+#endif
+		const FText OKButton		= NSLOCTEXT( "DialogButtons", "OKAY", "OK" );
+		
+		ShowMessageThenGotoState( ReturnReason, OKButton,  FText::GetEmpty(), AmethystForestInstanceState::MainMenu );
+	}
+#endif
+}
+
+void UAmethystForestInstance::OnPreLoadMap()
+{
+	if ( bPendingEnableSplitscreen )
+	{
+		// Allow splitscreen
+		GetGameViewportClient()->SetDisableSplitscreenOverride( false );
+
+		bPendingEnableSplitscreen = false;
+	}
+}
+
+void UAmethystForestInstance::OnPostLoadMap()
 {
 	// Make sure we hide the loading screen when the level is done loading
-	/* TO DO: GameViewport
-	UAmethystGameViewportClient * AmethystViewport = Cast<UAmethystGameViewportClient>(GetGameViewportClient());
+	UAmethystForestViewportClient * AmethystViewport = Cast<UAmethystForestViewportClient>(GetGameViewportClient());
 
-	if (AmethystViewport != NULL)
+	if ( AmethystViewport != NULL )
 	{
 		AmethystViewport->HideLoadingScreen();
 	}
-	*/
 }
 
-void UAmethystGameInstance::OnPostDemoPlay()
+void UAmethystForestInstance::OnUserCanPlayInvite(const FUniqueNetId& UserId, EUserPrivileges::Type Privilege, uint32 PrivilegeResults)
 {
-	GotoState(AmethystGameInstanceState::Playing);
+	CleanupOnlinePrivilegeTask();
+	if (WelcomeMenuUI.IsValid())
+	{
+		WelcomeMenuUI->LockControls(false);
+	}
+
+	if (PrivilegeResults == (uint32)IOnlineIdentity::EPrivilegeResults::NoFailures)	
+	{
+		if (UserId == *PendingInvite.UserId)
+		{
+			PendingInvite.bPrivilegesCheckedAndAllowed = true;
+		}		
+	}
+	else
+	{
+		DisplayOnlinePrivilegeFailureDialogs(UserId, Privilege, PrivilegeResults);
+		GotoState(AmethystForestInstanceState::WelcomeScreen);
+	}
 }
 
-void UAmethystGameInstance::HandleDemoPlaybackFailure(EDemoPlayFailure::Type FailureType, const FString& ErrorString)
+void UAmethystForestInstance::OnPostDemoPlay()
 {
-	ShowMessageThenGotoState(FText::Format(NSLOCTEXT("UAmethystGameInstance", "DemoPlaybackFailedFmt", "Demo playback failed: {0}"), FText::FromString(ErrorString)), NSLOCTEXT("DialogButtons", "OKAY", "OK"), FText::GetEmpty(), AmethystGameInstanceState::MainMenu);
+	GotoState( AmethystForestInstanceState::Playing );
 }
 
-void UAmethystGameInstance::StartGameInstance()
+void UAmethystForestInstance::HandleDemoPlaybackFailure( EDemoPlayFailure::Type FailureType, const FString& ErrorString )
+{
+	ShowMessageThenGotoState( FText::Format( NSLOCTEXT("UAmethystForestInstance", "DemoPlaybackFailedFmt", "Demo playback failed: {0}"), FText::FromString(ErrorString) ), NSLOCTEXT( "DialogButtons", "OKAY", "OK" ), FText::GetEmpty(), AmethystForestInstanceState::MainMenu );
+}
+
+void UAmethystForestInstance::StartGameInstance()
 {
 #if PLATFORM_PS4 == 0
 	TCHAR Parm[4096] = TEXT("");
@@ -170,15 +322,16 @@ void UAmethystGameInstance::StartGameInstance()
 				if (BrowseRet == EBrowseReturnVal::Success)
 				{
 					// Success, we loaded the map, go directly to playing state
-					GotoState(AmethystGameInstanceState::Playing);
+					GotoState(AmethystForestInstanceState::Playing);
 					return;
 				}
 				else if (BrowseRet == EBrowseReturnVal::Pending)
 				{
 					// Assume network connection
 					LoadFrontEndMap(MainMenuMap);
+					AddNetworkFailureHandlers();
 					ShowLoadingScreen();
-					GotoState(AmethystGameInstanceState::Playing);
+					GotoState(AmethystForestInstanceState::Playing);
 					return;
 				}
 			}
@@ -189,96 +342,100 @@ void UAmethystGameInstance::StartGameInstance()
 	GotoInitialState();
 }
 
-FName UAmethystGameInstance::GetInitialState()
+FName UAmethystForestInstance::GetInitialState()
 {
-#if Amethyst_CONSOLE_UI	
+#if SHOOTER_CONSOLE_UI	
 	// Start in the welcome screen state on consoles
-	return AmethystGameInstanceState::WelcomeScreen;
+	return AmethystForestInstanceState::WelcomeScreen;
 #else
 	// On PC, go directly to the main menu
-	return AmethystGameInstanceState::MainMenu;
+	return AmethystForestInstanceState::MainMenu;
 #endif
 }
 
-void UAmethystGameInstance::GotoInitialState()
+void UAmethystForestInstance::GotoInitialState()
 {
 	GotoState(GetInitialState());
 }
 
-void UAmethystGameInstance::ShowMessageThenGotoState(const FText& Message, const FText& OKButtonString, const FText& CancelButtonString, const FName& NewState, const bool OverrideExisting, TWeakObjectPtr< ULocalPlayer > PlayerOwner)
+void UAmethystForestInstance::ShowMessageThenGotoState( const FText& Message, const FText& OKButtonString, const FText& CancelButtonString, const FName& NewState, const bool OverrideExisting, TWeakObjectPtr< ULocalPlayer > PlayerOwner )
 {
-	/* TO DO: Add logs to each stage */
-	const bool bAtWelcomeScreen = PendingState == AmethystGameInstanceState::WelcomeScreen || CurrentState == AmethystGameInstanceState::WelcomeScreen;
+	UE_LOG( LogOnline, Log, TEXT( "ShowMessageThenGotoState: Message: %s, NewState: %s" ), *Message.ToString(), *NewState.ToString() );
+
+	const bool bAtWelcomeScreen = PendingState == AmethystForestInstanceState::WelcomeScreen || CurrentState == AmethystForestInstanceState::WelcomeScreen;
 
 	// Never override the welcome screen
-	if (bAtWelcomeScreen)
+	if ( bAtWelcomeScreen )
 	{
+		UE_LOG( LogOnline, Log, TEXT( "ShowMessageThenGotoState: Ignoring due to higher message priority in queue (at welcome screen)." ) );
 		return;
 	}
 
-	const bool bAlreadyAtMessageMenu = PendingState == AmethystGameInstanceState::MessageMenu || CurrentState == AmethystGameInstanceState::MessageMenu;
+	const bool bAlreadyAtMessageMenu = PendingState == AmethystForestInstanceState::MessageMenu || CurrentState == AmethystForestInstanceState::MessageMenu;
 	const bool bAlreadyAtDestState = PendingState == NewState || CurrentState == NewState;
 
 	// If we are already going to the message menu, don't override unless asked to
-	if (bAlreadyAtMessageMenu && PendingMessage.NextState == NewState && !OverrideExisting)
+	if ( bAlreadyAtMessageMenu && PendingMessage.NextState == NewState && !OverrideExisting )
 	{
+		UE_LOG( LogOnline, Log, TEXT( "ShowMessageThenGotoState: Ignoring due to higher message priority in queue (check 1)." ) );
 		return;
 	}
 
 	// If we are already going to the message menu, and the next dest is welcome screen, don't override
-	if (bAlreadyAtMessageMenu && PendingMessage.NextState == AmethystGameInstanceState::WelcomeScreen)
+	if ( bAlreadyAtMessageMenu && PendingMessage.NextState == AmethystForestInstanceState::WelcomeScreen )
 	{
+		UE_LOG( LogOnline, Log, TEXT( "ShowMessageThenGotoState: Ignoring due to higher message priority in queue (check 2)." ) );
 		return;
 	}
 
 	// If we are already at the dest state, don't override unless asked
-	if (bAlreadyAtDestState && !OverrideExisting)
+	if ( bAlreadyAtDestState && !OverrideExisting )
 	{
+		UE_LOG( LogOnline, Log, TEXT( "ShowMessageThenGotoState: Ignoring due to higher message priority in queue (check 3)" ) );
 		return;
 	}
 
-	PendingMessage.DisplayString = Message;
-	PendingMessage.OKButtonString = OKButtonString;
-	PendingMessage.CancelButtonString = CancelButtonString;
-	PendingMessage.NextState = NewState;
-	PendingMessage.PlayerOwner = PlayerOwner;
+	PendingMessage.DisplayString		= Message;
+	PendingMessage.OKButtonString		= OKButtonString;
+	PendingMessage.CancelButtonString	= CancelButtonString;
+	PendingMessage.NextState			= NewState;
+	PendingMessage.PlayerOwner			= PlayerOwner;
 
-	if (CurrentState == AmethystGameInstanceState::MessageMenu)
+	if ( CurrentState == AmethystForestInstanceState::MessageMenu )
 	{
+		UE_LOG( LogOnline, Log, TEXT( "ShowMessageThenGotoState: Forcing new message" ) );
 		EndMessageMenuState();
 		BeginMessageMenuState();
 	}
 	else
 	{
-		GotoState(AmethystGameInstanceState::MessageMenu);
+		GotoState(AmethystForestInstanceState::MessageMenu);
 	}
 }
 
-void UAmethystGameInstance::ShowLoadingScreen()
+void UAmethystForestInstance::ShowLoadingScreen()
 {
-	/* TO DO: Loading Screen Needed and GameViewport!
 	// This can be confusing, so here is what is happening:
-	//	For LoadMap, we use the IAmethystGameLoadingScreenModule interface to show the load screen
+	//	For LoadMap, we use the IAmethystForestLoadingScreenModule interface to show the load screen
 	//  This is necessary since this is a blocking call, and our viewport loading screen won't get updated.
-	//  We can't use IAmethystGameLoadingScreenModule for seamless travel though
+	//  We can't use IAmethystForestLoadingScreenModule for seamless travel though
 	//  In this case, we just add a widget to the viewport, and have it update on the main thread
 	//  To simplify things, we just do both, and you can't tell, one will cover the other if they both show at the same time
-	IAmethystGameLoadingScreenModule* const LoadingScreenModule = FModuleManager::LoadModulePtr<IAmethystGameLoadingScreenModule>("AmethystGameLoadingScreen");
+	IAmethystForestLoadingScreenModule* const LoadingScreenModule = FModuleManager::LoadModulePtr<IAmethystForestLoadingScreenModule>("AmethystForestLoadingScreen");
 	if (LoadingScreenModule != nullptr)
 	{
 		LoadingScreenModule->StartInGameLoadingScreen();
 	}
 
-	UAmethystGameViewportClient * AmethystViewport = Cast<UAmethystGameViewportClient>(GetGameViewportClient());
+	UAmethystForestViewportClient * AmethystViewport = Cast<UAmethystForestViewportClient>(GetGameViewportClient());
 
-	if (AmethystViewport != NULL)
+	if ( AmethystViewport != NULL )
 	{
 		AmethystViewport->ShowLoadingScreen();
 	}
-	*/
 }
 
-bool UAmethystGameInstance::LoadFrontEndMap(const FString& MapName)
+bool UAmethystForestInstance::LoadFrontEndMap(const FString& MapName)
 {
 	bool bSuccess = true;
 
@@ -300,7 +457,7 @@ bool UAmethystGameInstance::LoadFrontEndMap(const FString& MapName)
 		*FString::Printf(TEXT("%s"), *MapName)
 		);
 
-	if (URL.Valid && !HasAnyFlags(RF_ClassDefaultObject)) //CastChecked<UEngine>() will fail if using Default__AmethystGameInstance, so make sure that we're not default
+	if (URL.Valid && !HasAnyFlags(RF_ClassDefaultObject)) //CastChecked<UEngine>() will fail if using Default__AmethystForestInstance, so make sure that we're not default
 	{
 		BrowseRet = GetEngine()->Browse(*WorldContext, URL, Error);
 
@@ -314,7 +471,7 @@ bool UAmethystGameInstance::LoadFrontEndMap(const FString& MapName)
 	return bSuccess;
 }
 
-AAmethystGameSession* UAmethystGameInstance::GetGameSession() const
+AAmethystForestSession* UAmethystForestInstance::GetGameSession() const
 {
 	UWorld* const World = GetWorld();
 	if (World)
@@ -322,28 +479,44 @@ AAmethystGameSession* UAmethystGameInstance::GetGameSession() const
 		AGameMode* const Game = World->GetAuthGameMode();
 		if (Game)
 		{
-			/* TO DO: Fix this
-			return Cast<AAmethystGameSession>(Game->GameSession);
-			*/
+			return Cast<AAmethystForestSession>(Game->GameSession);
 		}
 	}
 
 	return nullptr;
 }
 
-void UAmethystGameInstance::ShowMessageThenGoMain(const FText& Message, const FText& OKButtonString, const FText& CancelButtonString)
+void UAmethystForestInstance::TravelLocalSessionFailure(UWorld *World, ETravelFailure::Type FailureType, const FString& ReasonString)
 {
-	ShowMessageThenGotoState(Message, OKButtonString, CancelButtonString, AmethystGameInstanceState::MainMenu);
+	AAmethystPlayerController_Menu* const FirstPC = Cast<AAmethystPlayerController_Menu>(UGameplayStatics::GetPlayerController(GetWorld(), 0));
+	if (FirstPC != nullptr)
+	{
+		FText ReturnReason = NSLOCTEXT("NetworkErrors", "JoinSessionFailed", "Join Session failed.");
+		if (ReasonString.IsEmpty() == false)
+		{
+			ReturnReason = FText::Format(NSLOCTEXT("NetworkErrors", "JoinSessionFailedReasonFmt", "Join Session failed. {0}"), FText::FromString(ReasonString));
+		}
+
+		FText OKButton = NSLOCTEXT("DialogButtons", "OKAY", "OK");
+		ShowMessageThenGoMain(ReturnReason, OKButton, FText::GetEmpty());
+	}
 }
 
-void UAmethystGameInstance::GotoState(FName NewState)
+void UAmethystForestInstance::ShowMessageThenGoMain(const FText& Message, const FText& OKButtonString, const FText& CancelButtonString)
 {
+	ShowMessageThenGotoState(Message, OKButtonString, CancelButtonString, AmethystForestInstanceState::MainMenu);
+}
+
+void UAmethystForestInstance::GotoState(FName NewState)
+{
+	UE_LOG( LogOnline, Log, TEXT( "GotoState: NewState: %s" ), *NewState.ToString() );
+
 	PendingState = NewState;
 }
 
-void UAmethystGameInstance::MaybeChangeState()
+void UAmethystForestInstance::MaybeChangeState()
 {
-	if ((PendingState != CurrentState) && (PendingState != AmethystGameInstanceState::None))
+	if ( (PendingState != CurrentState) && (PendingState != AmethystForestInstanceState::None) )
 	{
 		FName const OldState = CurrentState;
 
@@ -354,49 +527,58 @@ void UAmethystGameInstance::MaybeChangeState()
 		BeginNewState(PendingState, OldState);
 
 		// clear pending change
-		PendingState = AmethystGameInstanceState::None;
+		PendingState = AmethystForestInstanceState::None;
 	}
 }
 
-void UAmethystGameInstance::EndCurrentState(FName NextState)
+void UAmethystForestInstance::EndCurrentState(FName NextState)
 {
-	if (CurrentState == AmethystGameInstanceState::WelcomeScreen)
+	// per-state custom ending code here
+	if (CurrentState == AmethystForestInstanceState::PendingInvite)
+	{
+		EndPendingInviteState();
+	}
+	else if (CurrentState == AmethystForestInstanceState::WelcomeScreen)
 	{
 		EndWelcomeScreenState();
 	}
-	else if (CurrentState == AmethystGameInstanceState::MainMenu)
+	else if (CurrentState == AmethystForestInstanceState::MainMenu)
 	{
 		EndMainMenuState();
 	}
-	else if (CurrentState == AmethystGameInstanceState::MessageMenu)
+	else if (CurrentState == AmethystForestInstanceState::MessageMenu)
 	{
 		EndMessageMenuState();
 	}
-	else if (CurrentState == AmethystGameInstanceState::Playing)
+	else if (CurrentState == AmethystForestInstanceState::Playing)
 	{
 		EndPlayingState();
 	}
 
-	CurrentState = AmethystGameInstanceState::None;
+	CurrentState = AmethystForestInstanceState::None;
 }
 
-void UAmethystGameInstance::BeginNewState(FName NewState, FName PrevState)
+void UAmethystForestInstance::BeginNewState(FName NewState, FName PrevState)
 {
 	// per-state custom starting code here
 
-	if (NewState == AmethystGameInstanceState::WelcomeScreen)
+	if (NewState == AmethystForestInstanceState::PendingInvite)
+	{
+		BeginPendingInviteState();
+	}
+	else if (NewState == AmethystForestInstanceState::WelcomeScreen)
 	{
 		BeginWelcomeScreenState();
 	}
-	else if (NewState == AmethystGameInstanceState::MainMenu)
+	else if (NewState == AmethystForestInstanceState::MainMenu)
 	{
 		BeginMainMenuState();
 	}
-	else if (NewState == AmethystGameInstanceState::MessageMenu)
+	else if (NewState == AmethystForestInstanceState::MessageMenu)
 	{
 		BeginMessageMenuState();
 	}
-	else if (NewState == AmethystGameInstanceState::Playing)
+	else if (NewState == AmethystForestInstanceState::Playing)
 	{
 		BeginPlayingState();
 	}
@@ -404,20 +586,46 @@ void UAmethystGameInstance::BeginNewState(FName NewState, FName PrevState)
 	CurrentState = NewState;
 }
 
-void UAmethystGameInstance::BeginWelcomeScreenState()
+void UAmethystForestInstance::BeginPendingInviteState()
+{	
+	if (LoadFrontEndMap(MainMenuMap))
+	{				
+		StartOnlinePrivilegeTask(IOnlineIdentity::FOnGetUserPrivilegeCompleteDelegate::CreateUObject(this, &UAmethystForestInstance::OnUserCanPlayInvite), EUserPrivileges::CanPlayOnline, PendingInvite.UserId);
+	}
+	else
+	{
+		GotoState(AmethystForestInstanceState::WelcomeScreen);
+	}
+}
+
+void UAmethystForestInstance::EndPendingInviteState()
 {
+	// cleanup in case the state changed before the pending invite was handled.
+	CleanupOnlinePrivilegeTask();
+}
+
+void UAmethystForestInstance::BeginWelcomeScreenState()
+{
+	//this must come before split screen player removal so that the OSS sets all players to not using online features.
+	SetIsOnline(false);
+
+	// Remove any possible splitscren players
+	RemoveSplitScreenPlayers();
+
 	LoadFrontEndMap(WelcomeScreenMap);
 
 	ULocalPlayer* const LocalPlayer = GetFirstGamePlayer();
 	LocalPlayer->SetCachedUniqueNetId(nullptr);
 	check(!WelcomeMenuUI.IsValid());
 	WelcomeMenuUI = MakeShareable(new FAmethystWelcomeMenu);
-	WelcomeMenuUI->Construct(this);
+	WelcomeMenuUI->Construct( this );
 	WelcomeMenuUI->AddToGameViewport();
 
+	// Disallow splitscreen (we will allow while in the playing state)
+	GetGameViewportClient()->SetDisableSplitscreenOverride( true );
 }
 
-void UAmethystGameInstance::EndWelcomeScreenState()
+void UAmethystForestInstance::EndWelcomeScreenState()
 {
 	if (WelcomeMenuUI.IsValid())
 	{
@@ -426,16 +634,43 @@ void UAmethystGameInstance::EndWelcomeScreenState()
 	}
 }
 
-void UAmethystGameInstance::BeginMainMenuState()
+void UAmethystForestInstance::SetPresenceForLocalPlayers(const FVariantData& PresenceData)
+{
+	const auto Presence = Online::GetPresenceInterface();
+	if (Presence.IsValid())
+	{
+		for (int i = 0; i < LocalPlayers.Num(); ++i)
+		{
+			const TSharedPtr<const FUniqueNetId> UserId = LocalPlayers[i]->GetPreferredUniqueNetId();
+
+			if (UserId.IsValid())
+			{
+				FOnlineUserPresenceStatus PresenceStatus;
+				PresenceStatus.Properties.Add(DefaultPresenceKey, PresenceData);
+
+				Presence->SetPresence(*UserId, PresenceStatus);
+			}
+		}
+	}
+}
+
+void UAmethystForestInstance::BeginMainMenuState()
 {
 	// Make sure we're not showing the loadscreen
-	/* TO DO: GameViewportClient
-	UAmethystGameViewportClient * AmethystViewport = Cast<UAmethystGameViewportClient>(GetGameViewportClient());
+	UAmethystForestViewportClient * AmethystViewport = Cast<UAmethystForestViewportClient>(GetGameViewportClient());
 
-	if (AmethystViewport != NULL)
+	if ( AmethystViewport != NULL )
 	{
 		AmethystViewport->HideLoadingScreen();
 	}
+
+	SetIsOnline(false);
+
+	// Disallow splitscreen
+	GetGameViewportClient()->SetDisableSplitscreenOverride( true );
+
+	// Remove any possible splitscren players
+	RemoveSplitScreenPlayers();
 
 	// Set presence to menu state for the owning player
 	SetPresenceForLocalPlayers(FVariantData(FString(TEXT("OnMenu"))));
@@ -449,9 +684,8 @@ void UAmethystGameInstance::BeginMainMenuState()
 	MainMenuUI = MakeShareable(new FAmethystMainMenu());
 	MainMenuUI->Construct(this, Player);
 	MainMenuUI->AddMenuToGameViewport();
-	*/
-	ULocalPlayer* const Player = GetFirstGamePlayer();
-#if !Amethyst_CONSOLE_UI
+
+#if !SHOOTER_CONSOLE_UI
 	// The cached unique net ID is usually set on the welcome screen, but there isn't
 	// one on PC/Mac, so do it here.
 	if (Player != nullptr)
@@ -461,10 +695,10 @@ void UAmethystGameInstance::BeginMainMenuState()
 	}
 #endif
 
-	
+	RemoveNetworkFailureHandlers();
 }
 
-void UAmethystGameInstance::EndMainMenuState()
+void UAmethystForestInstance::EndMainMenuState()
 {
 	if (MainMenuUI.IsValid())
 	{
@@ -473,35 +707,31 @@ void UAmethystGameInstance::EndMainMenuState()
 	}
 }
 
-void UAmethystGameInstance::BeginMessageMenuState()
+void UAmethystForestInstance::BeginMessageMenuState()
 {
 	if (PendingMessage.DisplayString.IsEmpty())
 	{
+		UE_LOG(LogOnlineGame, Warning, TEXT("UAmethystForestInstance::BeginMessageMenuState: Display string is empty"));
 		GotoInitialState();
 		return;
 	}
 
 	// Make sure we're not showing the loadscreen
-	/* TO DO: GameViewportClient
-	UAmethystGameViewportClient * AmethystViewport = Cast<UAmethystGameViewportClient>(GetGameViewportClient());
-	
+	UAmethystForestViewportClient * AmethystViewport = Cast<UAmethystForestViewportClient>(GetGameViewportClient());
 
-	if (AmethystViewport != NULL)
+	if ( AmethystViewport != NULL )
 	{
 		AmethystViewport->HideLoadingScreen();
 	}
-	*/
 
 	check(!MessageMenuUI.IsValid());
 	MessageMenuUI = MakeShareable(new FAmethystMessageMenu);
-	/* TO DO: Should we construct this? 
 	MessageMenuUI->Construct(this, PendingMessage.PlayerOwner, PendingMessage.DisplayString, PendingMessage.OKButtonString, PendingMessage.CancelButtonString, PendingMessage.NextState);
-	*/
 
 	PendingMessage.DisplayString = FText::GetEmpty();
 }
 
-void UAmethystGameInstance::EndMessageMenuState()
+void UAmethystForestInstance::EndMessageMenuState()
 {
 	if (MessageMenuUI.IsValid())
 	{
@@ -510,48 +740,420 @@ void UAmethystGameInstance::EndMessageMenuState()
 	}
 }
 
-void UAmethystGameInstance::BeginPlayingState()
+void UAmethystForestInstance::BeginPlayingState()
 {
+	bPendingEnableSplitscreen = true;
+
+	// Set presence for playing in a map
+	SetPresenceForLocalPlayers(FVariantData(FString(TEXT("InGame"))));
+
 	// Make sure viewport has focus
 	FSlateApplication::Get().SetAllUserFocusToGameViewport();
 }
 
-void UAmethystGameInstance::EndPlayingState()
+void UAmethystForestInstance::EndPlayingState()
 {
+	// Disallow splitscreen
+	GetGameViewportClient()->SetDisableSplitscreenOverride( true );
+
+	// Clear the players' presence information
+	SetPresenceForLocalPlayers(FVariantData(FString(TEXT("OnMenu"))));
+
 	UWorld* const World = GetWorld();
-	AAmethystGameState* const GameState = World != NULL ? World->GetGameState<AAmethystGameState>() : NULL;
+	AAmethystForestState* const GameState = World != NULL ? World->GetGameState<AAmethystForestState>() : NULL;
 
 	if (GameState)
 	{
 		// Send round end events for local players
 		for (int i = 0; i < LocalPlayers.Num(); ++i)
 		{
-			auto AmethystPC = Cast<AamethystforestPlayerController>(LocalPlayers[i]->PlayerController);
+			auto AmethystPC = Cast<AAmethystPlayerController>(LocalPlayers[i]->PlayerController);
 			if (AmethystPC)
 			{
 				// Assuming you can't win if you quit early
-				/* TO DO: added this function in Gamestate
 				AmethystPC->ClientSendRoundEndEvent(false, GameState->ElapsedTime);
-				*/
 			}
 		}
 
 		// Give the game state a chance to cleanup first
 		GameState->RequestFinishAndExitToMainMenu();
 	}
+	else
+	{
+		// If there is no game state, make sure the session is in a good state
+		CleanupSessionOnReturnToMenu();
+	}
 }
 
-bool UAmethystGameInstance::PlayDemo(ULocalPlayer* LocalPlayer, const FString& DemoName)
+void UAmethystForestInstance::OnEndSessionComplete( FName SessionName, bool bWasSuccessful )
+{
+	UE_LOG(LogOnline, Log, TEXT("UAmethystForestInstance::OnEndSessionComplete: Session=%s bWasSuccessful=%s"), *SessionName.ToString(), bWasSuccessful ? TEXT("true") : TEXT("false") );
+
+	IOnlineSubsystem* OnlineSub = IOnlineSubsystem::Get();
+	if (OnlineSub)
+	{
+		IOnlineSessionPtr Sessions = OnlineSub->GetSessionInterface();
+		if (Sessions.IsValid())
+		{
+			Sessions->ClearOnStartSessionCompleteDelegate_Handle  (OnStartSessionCompleteDelegateHandle);
+			Sessions->ClearOnEndSessionCompleteDelegate_Handle    (OnEndSessionCompleteDelegateHandle);
+			Sessions->ClearOnDestroySessionCompleteDelegate_Handle(OnDestroySessionCompleteDelegateHandle);
+		}
+	}
+
+	// continue
+	CleanupSessionOnReturnToMenu();
+}
+
+void UAmethystForestInstance::CleanupSessionOnReturnToMenu()
+{
+	bool bPendingOnlineOp = false;
+
+	// end online game and then destroy it
+	IOnlineSubsystem * OnlineSub = IOnlineSubsystem::Get();
+	IOnlineSessionPtr Sessions = ( OnlineSub != NULL ) ? OnlineSub->GetSessionInterface() : NULL;
+
+	if ( Sessions.IsValid() )
+	{
+		EOnlineSessionState::Type SessionState = Sessions->GetSessionState(GameSessionName);
+		UE_LOG(LogOnline, Log, TEXT("Session %s is '%s'"), *GameSessionName.ToString(), EOnlineSessionState::ToString(SessionState));
+
+		if ( EOnlineSessionState::InProgress == SessionState )
+		{
+			UE_LOG(LogOnline, Log, TEXT("Ending session %s on return to main menu"), *GameSessionName.ToString() );
+			OnEndSessionCompleteDelegateHandle = Sessions->AddOnEndSessionCompleteDelegate_Handle(OnEndSessionCompleteDelegate);
+			Sessions->EndSession(GameSessionName);
+			bPendingOnlineOp = true;
+		}
+		else if ( EOnlineSessionState::Ending == SessionState )
+		{
+			UE_LOG(LogOnline, Log, TEXT("Waiting for session %s to end on return to main menu"), *GameSessionName.ToString() );
+			OnEndSessionCompleteDelegateHandle = Sessions->AddOnEndSessionCompleteDelegate_Handle(OnEndSessionCompleteDelegate);
+			bPendingOnlineOp = true;
+		}
+		else if ( EOnlineSessionState::Ended == SessionState || EOnlineSessionState::Pending == SessionState )
+		{
+			UE_LOG(LogOnline, Log, TEXT("Destroying session %s on return to main menu"), *GameSessionName.ToString() );				
+			OnDestroySessionCompleteDelegateHandle = Sessions->AddOnDestroySessionCompleteDelegate_Handle(OnEndSessionCompleteDelegate);
+			Sessions->DestroySession(GameSessionName);
+			bPendingOnlineOp = true;
+		}
+		else if ( EOnlineSessionState::Starting == SessionState )
+		{
+			UE_LOG(LogOnline, Log, TEXT("Waiting for session %s to start, and then we will end it to return to main menu"), *GameSessionName.ToString() );
+			OnStartSessionCompleteDelegateHandle = Sessions->AddOnStartSessionCompleteDelegate_Handle(OnEndSessionCompleteDelegate);
+			bPendingOnlineOp = true;
+		}
+	}
+
+	if ( !bPendingOnlineOp )
+	{
+		//GEngine->HandleDisconnect( GetWorld(), GetWorld()->GetNetDriver() );
+	}
+}
+
+void UAmethystForestInstance::LabelPlayerAsQuitter(ULocalPlayer* LocalPlayer) const
+{
+	AAmethystPlayerState* const PlayerState = LocalPlayer && LocalPlayer->PlayerController ? Cast<AAmethystPlayerState>(LocalPlayer->PlayerController->PlayerState) : nullptr;
+	if(PlayerState)
+	{
+		PlayerState->SetQuitter(true);
+	}
+}
+
+void UAmethystForestInstance::RemoveNetworkFailureHandlers()
+{
+	// Remove the local session/travel failure bindings if they exist
+	if (GEngine->OnTravelFailure().IsBoundToObject(this) == true)
+	{
+		GEngine->OnTravelFailure().Remove(TravelLocalSessionFailureDelegateHandle);
+	}
+}
+
+void UAmethystForestInstance::AddNetworkFailureHandlers()
+{
+	// Add network/travel error handlers (if they are not already there)
+	if (GEngine->OnTravelFailure().IsBoundToObject(this) == false)
+	{
+		TravelLocalSessionFailureDelegateHandle = GEngine->OnTravelFailure().AddUObject(this, &UAmethystForestInstance::TravelLocalSessionFailure);
+	}
+}
+
+// starts playing a game as the host
+bool UAmethystForestInstance::HostGame(ULocalPlayer* LocalPlayer, const FString& GameType, const FString& InTravelURL)
+{
+	if (!GetIsOnline())
+	{
+		//
+		// Offline game, just go straight to map
+		//
+
+		ShowLoadingScreen();
+		GotoState(AmethystForestInstanceState::Playing);
+
+		// Travel to the specified match URL
+		TravelURL = InTravelURL;
+		GetWorld()->ServerTravel(TravelURL);
+		return true;
+	}
+
+	//
+	// Online game
+	//
+
+	AAmethystForestSession* const GameSession = GetGameSession();
+	if (GameSession)
+	{
+		// add callback delegate for completion
+		OnCreatePresenceSessionCompleteDelegateHandle = GameSession->OnCreatePresenceSessionComplete().AddUObject(this, &UAmethystForestInstance::OnCreatePresenceSessionComplete);
+
+		TravelURL = InTravelURL;
+		bool const bIsLanMatch = InTravelURL.Contains(TEXT("?bIsLanMatch"));
+
+		//determine the map name from the travelURL
+		const FString& MapNameSubStr = "/Game/Maps/";
+		const FString& ChoppedMapName = TravelURL.RightChop(MapNameSubStr.Len());
+		const FString& MapName = ChoppedMapName.LeftChop(ChoppedMapName.Len() - ChoppedMapName.Find("?game"));
+
+		if (GameSession->HostSession(LocalPlayer->GetPreferredUniqueNetId(), GameSessionName, GameType, MapName, bIsLanMatch, true, AAmethystForestSession::DEFAULT_NUM_PLAYERS))
+		{
+			// If any error occured in the above, pending state would be set
+			if ( (PendingState == CurrentState) || (PendingState == AmethystForestInstanceState::None) )
+			{
+				// Go ahead and go into loading state now
+				// If we fail, the delegate will handle showing the proper messaging and move to the correct state
+				ShowLoadingScreen();
+				GotoState(AmethystForestInstanceState::Playing);
+				return true;
+			}
+		}
+	}
+
+	return false;
+}
+
+bool UAmethystForestInstance::JoinSession(ULocalPlayer* LocalPlayer, int32 SessionIndexInSearchResults)
+{
+	// needs to tear anything down based on current state?
+
+	AAmethystForestSession* const GameSession = GetGameSession();
+	if (GameSession)
+	{
+		AddNetworkFailureHandlers();
+
+		OnJoinSessionCompleteDelegateHandle = GameSession->OnJoinSessionComplete().AddUObject(this, &UAmethystForestInstance::OnJoinSessionComplete);
+		if (GameSession->JoinSession(LocalPlayer->GetPreferredUniqueNetId(), GameSessionName, SessionIndexInSearchResults))
+		{
+			// If any error occured in the above, pending state would be set
+			if ( (PendingState == CurrentState) || (PendingState == AmethystForestInstanceState::None) )
+			{
+				// Go ahead and go into loading state now
+				// If we fail, the delegate will handle showing the proper messaging and move to the correct state
+				ShowLoadingScreen();
+				GotoState(AmethystForestInstanceState::Playing);
+				return true;
+			}
+		}
+	}
+
+	return false;
+}
+
+bool UAmethystForestInstance::JoinSession(ULocalPlayer* LocalPlayer, const FOnlineSessionSearchResult& SearchResult)
+{
+	// needs to tear anything down based on current state?
+	AAmethystForestSession* const GameSession = GetGameSession();
+	if (GameSession)
+	{
+		AddNetworkFailureHandlers();
+
+		OnJoinSessionCompleteDelegateHandle = GameSession->OnJoinSessionComplete().AddUObject(this, &UAmethystForestInstance::OnJoinSessionComplete);
+		if (GameSession->JoinSession(LocalPlayer->GetPreferredUniqueNetId(), GameSessionName, SearchResult))
+		{
+			// If any error occured in the above, pending state would be set
+			if ( (PendingState == CurrentState) || (PendingState == AmethystForestInstanceState::None) )
+			{
+				// Go ahead and go into loading state now
+				// If we fail, the delegate will handle showing the proper messaging and move to the correct state
+				ShowLoadingScreen();
+				GotoState(AmethystForestInstanceState::Playing);
+				return true;
+			}
+		}
+	}
+
+	return false;
+}
+
+bool UAmethystForestInstance::PlayDemo(ULocalPlayer* LocalPlayer, const FString& DemoName)
 {
 	ShowLoadingScreen();
 
 	// Play the demo
-	GEngine->Exec(GetWorld(), *FString::Printf(TEXT("DEMOPLAY %s"), *DemoName));
-
+	PlayReplay(DemoName);
+	
 	return true;
 }
 
-bool UAmethystGameInstance::Tick(float DeltaSeconds)
+/** Callback which is intended to be called upon finding sessions */
+void UAmethystForestInstance::OnJoinSessionComplete(EOnJoinSessionCompleteResult::Type Result)
+{
+	// unhook the delegate
+	AAmethystForestSession* const GameSession = GetGameSession();
+	if (GameSession)
+	{
+		GameSession->OnJoinSessionComplete().Remove(OnJoinSessionCompleteDelegateHandle);
+	}
+
+	// Add the splitscreen player if one exists
+	if (Result == EOnJoinSessionCompleteResult::Success && LocalPlayers.Num() > 1)
+	{
+		auto Sessions = Online::GetSessionInterface();
+		if (Sessions.IsValid() && LocalPlayers[1]->GetPreferredUniqueNetId().IsValid())
+		{
+			Sessions->RegisterLocalPlayer(*LocalPlayers[1]->GetPreferredUniqueNetId(), GameSessionName,
+				FOnRegisterLocalPlayerCompleteDelegate::CreateUObject(this, &UAmethystForestInstance::OnRegisterJoiningLocalPlayerComplete));
+		}
+	}
+	else
+	{
+		// We either failed or there is only a single local user
+		FinishJoinSession(Result);
+	}
+}
+
+void UAmethystForestInstance::FinishJoinSession(EOnJoinSessionCompleteResult::Type Result)
+{
+	if (Result != EOnJoinSessionCompleteResult::Success)
+	{
+		FText ReturnReason;
+		switch (Result)
+		{
+		case EOnJoinSessionCompleteResult::SessionIsFull:
+			ReturnReason = NSLOCTEXT("NetworkErrors", "JoinSessionFailed", "Game is full.");
+			break;
+		case EOnJoinSessionCompleteResult::SessionDoesNotExist:
+			ReturnReason = NSLOCTEXT("NetworkErrors", "JoinSessionFailed", "Game no longer exists.");
+			break;
+		default:
+			ReturnReason = NSLOCTEXT("NetworkErrors", "JoinSessionFailed", "Join failed.");
+			break;
+		}
+
+		FText OKButton = NSLOCTEXT("DialogButtons", "OKAY", "OK");
+		RemoveNetworkFailureHandlers();
+		ShowMessageThenGoMain(ReturnReason, OKButton, FText::GetEmpty());
+		return;
+	}
+
+	InternalTravelToSession(GameSessionName);
+}
+
+void UAmethystForestInstance::OnRegisterJoiningLocalPlayerComplete(const FUniqueNetId& PlayerId, EOnJoinSessionCompleteResult::Type Result)
+{
+	FinishJoinSession(Result);
+}
+
+void UAmethystForestInstance::InternalTravelToSession(const FName& SessionName)
+{
+	APlayerController * const PlayerController = GetFirstLocalPlayerController();
+
+	if ( PlayerController == nullptr )
+	{
+		FText ReturnReason = NSLOCTEXT("NetworkErrors", "InvalidPlayerController", "Invalid Player Controller");
+		FText OKButton = NSLOCTEXT("DialogButtons", "OKAY", "OK");
+		RemoveNetworkFailureHandlers();
+		ShowMessageThenGoMain(ReturnReason, OKButton, FText::GetEmpty());
+		return;
+	}
+
+	// travel to session
+	IOnlineSubsystem* OnlineSub = IOnlineSubsystem::Get();
+
+	if ( OnlineSub == nullptr )
+	{
+		FText ReturnReason = NSLOCTEXT("NetworkErrors", "OSSMissing", "OSS missing");
+		FText OKButton = NSLOCTEXT("DialogButtons", "OKAY", "OK");
+		RemoveNetworkFailureHandlers();
+		ShowMessageThenGoMain(ReturnReason, OKButton, FText::GetEmpty());
+		return;
+	}
+
+	FString URL;
+	IOnlineSessionPtr Sessions = OnlineSub->GetSessionInterface();
+
+	if ( !Sessions.IsValid() || !Sessions->GetResolvedConnectString( SessionName, URL ) )
+	{
+		FText FailReason = NSLOCTEXT("NetworkErrors", "TravelSessionFailed", "Travel to Session failed.");
+		FText OKButton = NSLOCTEXT("DialogButtons", "OKAY", "OK");
+		ShowMessageThenGoMain(FailReason, OKButton, FText::GetEmpty());
+		UE_LOG(LogOnlineGame, Warning, TEXT("Failed to travel to session upon joining it"));
+		return;
+	}
+
+	PlayerController->ClientTravel(URL, TRAVEL_Absolute);
+}
+
+/** Callback which is intended to be called upon session creation */
+void UAmethystForestInstance::OnCreatePresenceSessionComplete(FName SessionName, bool bWasSuccessful)
+{
+	AAmethystForestSession* const GameSession = GetGameSession();
+	if (GameSession)
+	{
+		GameSession->OnCreatePresenceSessionComplete().Remove(OnCreatePresenceSessionCompleteDelegateHandle);
+
+		// Add the splitscreen player if one exists
+		if (bWasSuccessful && LocalPlayers.Num() > 1)
+		{
+			auto Sessions = Online::GetSessionInterface();
+			if (Sessions.IsValid() && LocalPlayers[1]->GetPreferredUniqueNetId().IsValid())
+			{
+				Sessions->RegisterLocalPlayer(*LocalPlayers[1]->GetPreferredUniqueNetId(), GameSessionName,
+					FOnRegisterLocalPlayerCompleteDelegate::CreateUObject(this, &UAmethystForestInstance::OnRegisterLocalPlayerComplete));
+			}
+		}
+		else
+		{
+			// We either failed or there is only a single local user
+			FinishSessionCreation(bWasSuccessful ? EOnJoinSessionCompleteResult::Success : EOnJoinSessionCompleteResult::UnknownError);
+		}
+	}
+}
+
+/** Initiates the session searching */
+bool UAmethystForestInstance::FindSessions(ULocalPlayer* PlayerOwner, bool bFindLAN)
+{
+	bool bResult = false;
+
+	check(PlayerOwner != nullptr);
+	if (PlayerOwner)
+	{
+		AAmethystForestSession* const GameSession = GetGameSession();
+		if (GameSession)
+		{
+			GameSession->OnFindSessionsComplete().RemoveAll(this);
+			OnSearchSessionsCompleteDelegateHandle = GameSession->OnFindSessionsComplete().AddUObject(this, &UAmethystForestInstance::OnSearchSessionsComplete);
+
+			GameSession->FindSessions(PlayerOwner->GetPreferredUniqueNetId(), GameSessionName, bFindLAN, true);
+
+			bResult = true;
+		}
+	}
+
+	return bResult;
+}
+
+/** Callback which is intended to be called upon finding sessions */
+void UAmethystForestInstance::OnSearchSessionsComplete(bool bWasSuccessful)
+{
+	AAmethystForestSession* const Session = GetGameSession();
+	if (Session)
+	{
+		Session->OnFindSessionsComplete().Remove(OnSearchSessionsCompleteDelegateHandle);
+	}
+}
+
+bool UAmethystForestInstance::Tick(float DeltaSeconds)
 {
 	// Dedicated server doesn't need to worry about game state
 	if (IsRunningDedicatedServer() == true)
@@ -561,22 +1163,21 @@ bool UAmethystGameInstance::Tick(float DeltaSeconds)
 
 	MaybeChangeState();
 
-	
-	UAmethystGameViewportClient * AmethystViewport = Cast<UAmethystGameViewportClient>(GetGameViewportClient());
+	UAmethystForestViewportClient * AmethystViewport = Cast<UAmethystForestViewportClient>(GetGameViewportClient());
 
-	if (CurrentState != AmethystGameInstanceState::WelcomeScreen)
+	if (CurrentState != AmethystForestInstanceState::WelcomeScreen)
 	{
 		// If at any point we aren't licensed (but we are after welcome screen) bounce them back to the welcome screen
-		if (!bIsLicensed && CurrentState != AmethystGameInstanceState::None && !AmethystViewport->IsShowingDialog())
+		if (!bIsLicensed && CurrentState != AmethystForestInstanceState::None && !AmethystViewport->IsShowingDialog())
 		{
-			const FText ReturnReason = NSLOCTEXT("ProfileMessages", "NeedLicense", "The signed in users do not have a license for this game. Please purchase AmethystGame from the Xbox Marketplace or sign in a user with a valid license.");
-			const FText OKButton = NSLOCTEXT("DialogButtons", "OKAY", "OK");
+			const FText ReturnReason	= NSLOCTEXT( "ProfileMessages", "NeedLicense", "The signed in users do not have a license for this game. Please purchase AmethystForest from the Xbox Marketplace or sign in a user with a valid license." );
+			const FText OKButton		= NSLOCTEXT( "DialogButtons", "OKAY", "OK" );
 
-			ShowMessageThenGotoState(ReturnReason, OKButton, FText::GetEmpty(), AmethystGameInstanceState::WelcomeScreen);
+			ShowMessageThenGotoState( ReturnReason, OKButton, FText::GetEmpty(), AmethystForestInstanceState::WelcomeScreen );
 		}
 
 		// Show controller disconnected dialog if any local players have an invalid controller
-		if (AmethystViewport != NULL &&
+		if(AmethystViewport != NULL &&
 			!AmethystViewport->IsShowingDialog())
 		{
 			for (int i = 0; i < LocalPlayers.Num(); ++i)
@@ -593,31 +1194,110 @@ bool UAmethystGameInstance::Tick(float DeltaSeconds)
 						NSLOCTEXT("DialogButtons", "AButtonContinue", "A - Continue"),
 #endif
 						FText::GetEmpty(),
-						FOnClicked::CreateUObject(this, &UAmethystGameInstance::OnControllerReconnectConfirm),
+						FOnClicked::CreateUObject(this, &UAmethystForestInstance::OnControllerReconnectConfirm),
 						FOnClicked()
-						);
+					);
 				}
 			}
 		}
 	}
-	
+
+	// If we have a pending invite, and we are at the welcome screen, and the session is properly shut down, accept it
+	if (PendingInvite.UserId.IsValid() && PendingInvite.bPrivilegesCheckedAndAllowed && CurrentState == AmethystForestInstanceState::PendingInvite)
+	{
+		IOnlineSubsystem * OnlineSub = IOnlineSubsystem::Get();
+		IOnlineSessionPtr Sessions = (OnlineSub != NULL) ? OnlineSub->GetSessionInterface() : NULL;
+
+		if (Sessions.IsValid())
+		{
+			EOnlineSessionState::Type SessionState = Sessions->GetSessionState(GameSessionName);
+
+			if (SessionState == EOnlineSessionState::NoSession)
+			{
+				ULocalPlayer * NewPlayerOwner = GetFirstGamePlayer();
+
+				if (NewPlayerOwner != nullptr)
+				{
+					NewPlayerOwner->SetControllerId(PendingInvite.ControllerId);
+					NewPlayerOwner->SetCachedUniqueNetId(PendingInvite.UserId);
+					SetIsOnline(true);
+					JoinSession(NewPlayerOwner, PendingInvite.InviteResult);					
+				}
+
+				PendingInvite.UserId.Reset();
+			}			
+		}
+	}
+
 	return true;
 }
 
-bool UAmethystGameInstance::HandleOpenCommand(const TCHAR* Cmd, FOutputDevice& Ar, UWorld* InWorld)
+bool UAmethystForestInstance::HandleOpenCommand(const TCHAR* Cmd, FOutputDevice& Ar, UWorld* InWorld)
 {
 	bool const bOpenSuccessful = Super::HandleOpenCommand(Cmd, Ar, InWorld);
 	if (bOpenSuccessful)
 	{
-		GotoState(AmethystGameInstanceState::Playing);
+		GotoState(AmethystForestInstanceState::Playing);
 	}
 
 	return bOpenSuccessful;
 }
 
-void UAmethystGameInstance::HandleAppWillDeactivate()
+void UAmethystForestInstance::HandleSignInChangeMessaging()
 {
-	if (CurrentState == AmethystGameInstanceState::Playing)
+	// Master user signed out, go to initial state (if we aren't there already)
+	if ( CurrentState != GetInitialState() )
+	{
+#if SHOOTER_CONSOLE_UI
+		// Display message on consoles
+		const FText ReturnReason	= NSLOCTEXT( "ProfileMessages", "SignInChange", "Sign in status change occurred." );
+		const FText OKButton		= NSLOCTEXT( "DialogButtons", "OKAY", "OK" );
+
+		ShowMessageThenGotoState(ReturnReason, OKButton, FText::GetEmpty(), GetInitialState());
+#else								
+		GotoInitialState();
+#endif
+	}
+}
+
+void UAmethystForestInstance::HandleUserLoginChanged(int32 GameUserIndex, ELoginStatus::Type PreviousLoginStatus, ELoginStatus::Type LoginStatus, const FUniqueNetId& UserId)
+{
+	const bool bDowngraded = (LoginStatus == ELoginStatus::NotLoggedIn && !GetIsOnline()) || (LoginStatus != ELoginStatus::LoggedIn && GetIsOnline());	
+
+	UE_LOG( LogOnline, Log, TEXT( "HandleUserLoginChanged: bDownGraded: %i" ), (int)bDowngraded );
+
+	TSharedPtr<GenericApplication> GenericApplication = FSlateApplication::Get().GetPlatformApplication();
+	bIsLicensed = GenericApplication->ApplicationLicenseValid();
+
+	// Find the local player associated with this unique net id
+	ULocalPlayer * LocalPlayer = FindLocalPlayerFromUniqueNetId( UserId );
+
+	// If this user is signed out, but was previously signed in, punt to welcome (or remove splitscreen if that makes sense)
+	if ( LocalPlayer != NULL )
+	{
+		if (bDowngraded)
+		{
+			UE_LOG( LogOnline, Log, TEXT( "HandleUserLoginChanged: Player logged out: %s" ), *UserId.ToString() );
+
+			LabelPlayerAsQuitter(LocalPlayer);
+
+			// Check to see if this was the master, or if this was a split-screen player on the client
+			if ( LocalPlayer == GetFirstGamePlayer() || GetIsOnline() )
+			{
+				HandleSignInChangeMessaging();
+			}
+			else
+			{
+				// Remove local split-screen players from the list
+				RemoveExistingLocalPlayer( LocalPlayer );
+			}
+		}
+	}
+}
+
+void UAmethystForestInstance::HandleAppWillDeactivate()
+{
+	if (CurrentState == AmethystForestInstanceState::Playing)
 	{
 		// Just have the first player controller pause the game.
 		UWorld* const GameWorld = GetWorld();
@@ -627,7 +1307,7 @@ void UAmethystGameInstance::HandleAppWillDeactivate()
 			bool bNeedsPause = true;
 			for (FConstControllerIterator It = GameWorld->GetControllerIterator(); It; ++It)
 			{
-				AamethystforestPlayerController* Controller = Cast<AamethystforestPlayerController>(*It);
+				AAmethystPlayerController* Controller = Cast<AAmethystPlayerController>(*It);
 				if (Controller && (Controller->IsPaused() || Controller->IsGameMenuVisible()))
 				{
 					bNeedsPause = false;
@@ -637,8 +1317,8 @@ void UAmethystGameInstance::HandleAppWillDeactivate()
 
 			if (bNeedsPause)
 			{
-				AamethystforestPlayerController* const Controller = Cast<AamethystforestPlayerController>(GameWorld->GetFirstPlayerController());
-				if (Controller) 
+				AAmethystPlayerController* const Controller = Cast<AAmethystPlayerController>(GameWorld->GetFirstPlayerController());
+				if (Controller)
 				{
 					Controller->ShowInGameMenu();
 				}
@@ -647,115 +1327,160 @@ void UAmethystGameInstance::HandleAppWillDeactivate()
 	}
 }
 
-void UAmethystGameInstance::HandleAppSuspend()
+void UAmethystForestInstance::HandleAppSuspend()
 {
 	// Players will lose connection on resume. However it is possible the game will exit before we get a resume, so we must kick off round end events here.
-	UWorld* const World = GetWorld();
-	AAmethystGameState* const GameState = World != NULL ? World->GetGameState<AAmethystGameState>() : NULL;
+	UE_LOG( LogOnline, Warning, TEXT( "UAmethystForestInstance::HandleAppSuspend" ) );
+	UWorld* const World = GetWorld(); 
+	AAmethystForestState* const GameState = World != NULL ? World->GetGameState<AAmethystForestState>() : NULL;
 
-	if (CurrentState != AmethystGameInstanceState::None && CurrentState != GetInitialState())
+	if ( CurrentState != AmethystForestInstanceState::None && CurrentState != GetInitialState() )
 	{
+		UE_LOG( LogOnline, Warning, TEXT( "UAmethystForestInstance::HandleAppSuspend: Sending round end event for players" ) );
 
 		// Send round end events for local players
 		for (int i = 0; i < LocalPlayers.Num(); ++i)
 		{
-			auto AmethystPC = Cast<AamethystforestPlayerController>(LocalPlayers[i]->PlayerController);
+			auto AmethystPC = Cast<AAmethystPlayerController>(LocalPlayers[i]->PlayerController);
 			if (AmethystPC)
 			{
 				// Assuming you can't win if you quit early
-				/* TO DO: Add function in player controller 
 				AmethystPC->ClientSendRoundEndEvent(false, GameState->ElapsedTime);
-				*/
 			}
 		}
 	}
 }
 
-void UAmethystGameInstance::HandleAppResume()
+void UAmethystForestInstance::HandleAppResume()
 {
-	/* TO DO: Hmmmm */
+	UE_LOG( LogOnline, Log, TEXT( "UAmethystForestInstance::HandleAppResume" ) );
+
+	if ( CurrentState != AmethystForestInstanceState::None && CurrentState != GetInitialState() )
+	{
+		UE_LOG( LogOnline, Warning, TEXT( "UAmethystForestInstance::HandleAppResume: Attempting to sign out players" ) );
+
+		for ( int32 i = 0; i < LocalPlayers.Num(); ++i )
+		{
+			if ( LocalPlayers[i]->GetCachedUniqueNetId().IsValid() && !IsLocalPlayerOnline( LocalPlayers[i] ) )
+			{
+				UE_LOG( LogOnline, Log, TEXT( "UAmethystForestInstance::HandleAppResume: Signed out during resume." ) );
+				HandleSignInChangeMessaging();
+				break;
+			}
+		}
+	}
 }
 
-void UAmethystGameInstance::HandleAppLicenseUpdate()
+void UAmethystForestInstance::HandleAppLicenseUpdate()
 {
 	TSharedPtr<GenericApplication> GenericApplication = FSlateApplication::Get().GetPlatformApplication();
 	bIsLicensed = GenericApplication->ApplicationLicenseValid();
 }
 
-void UAmethystGameInstance::HandleSafeFrameChanged()
+void UAmethystForestInstance::HandleSafeFrameChanged()
 {
 	UCanvas::UpdateAllCanvasSafeZoneData();
 }
 
-FReply UAmethystGameInstance::OnPairingUsePreviousProfile()
+void UAmethystForestInstance::RemoveExistingLocalPlayer(ULocalPlayer* ExistingPlayer)
+{
+	check(ExistingPlayer);
+	if (ExistingPlayer->PlayerController != NULL)
+	{
+		// Kill the player
+		AAmethystCharacter* MyPawn = Cast<AAmethystCharacter>(ExistingPlayer->PlayerController->GetPawn());
+		if ( MyPawn )
+		{
+			MyPawn->KilledBy(NULL);
+		}
+	}
+
+	// Remove local split-screen players from the list
+	RemoveLocalPlayer( ExistingPlayer );
+}
+
+void UAmethystForestInstance::RemoveSplitScreenPlayers()
+{
+	// if we had been split screen, toss the extra players now
+	// remove every player, back to front, except the first one
+	while (LocalPlayers.Num() > 1)
+	{
+		ULocalPlayer* const PlayerToRemove = LocalPlayers.Last();
+		RemoveExistingLocalPlayer(PlayerToRemove);
+	}
+}
+
+FReply UAmethystForestInstance::OnPairingUsePreviousProfile()
 {
 	// Do nothing (except hide the message) if they want to continue using previous profile
-	/* TO DO: GameViewportClient
-	UAmethystGameViewportClient * AmethystViewport = Cast<UAmethystGameViewportClient>(GetGameViewportClient());
+	UAmethystForestViewportClient * AmethystViewport = Cast<UAmethystForestViewportClient>(GetGameViewportClient());
 
-	if (AmethystViewport != nullptr)
+	if ( AmethystViewport != nullptr )
 	{
 		AmethystViewport->HideDialog();
 	}
-	*/
 
 	return FReply::Handled();
 }
 
-FReply UAmethystGameInstance::OnPairingUseNewProfile()
+FReply UAmethystForestInstance::OnPairingUseNewProfile()
 {
+	HandleSignInChangeMessaging();
 	return FReply::Handled();
 }
 
-void UAmethystGameInstance::HandleControllerPairingChanged(int GameUserIndex, const FUniqueNetId& PreviousUser, const FUniqueNetId& NewUser)
+void UAmethystForestInstance::HandleControllerPairingChanged( int GameUserIndex, const FUniqueNetId& PreviousUser, const FUniqueNetId& NewUser )
 {
-	if (CurrentState == AmethystGameInstanceState::WelcomeScreen)
+	UE_LOG(LogOnlineGame, Log, TEXT("UAmethystForestInstance::HandleControllerPairingChanged GameUserIndex %d PreviousUser '%s' NewUser '%s'"),
+		GameUserIndex, *PreviousUser.ToString(), *NewUser.ToString());
+	
+	if ( CurrentState == AmethystForestInstanceState::WelcomeScreen )
 	{
 		// Don't care about pairing changes at welcome screen
 		return;
 	}
 
-#if Amethyst_CONSOLE_UI && PLATFORM_XBOXONE
-	if (IgnorePairingChangeForControllerId != -1 && GameUserIndex == IgnorePairingChangeForControllerId)
+#if SHOOTER_CONSOLE_UI && PLATFORM_XBOXONE
+	if ( IgnorePairingChangeForControllerId != -1 && GameUserIndex == IgnorePairingChangeForControllerId )
 	{
-		// We were told to ignores
+		// We were told to ignore
 		IgnorePairingChangeForControllerId = -1;	// Reset now so there there is no chance this remains in a bad state
 		return;
 	}
 
-	if (PreviousUser.IsValid() && !NewUser.IsValid())
+	if ( PreviousUser.IsValid() && !NewUser.IsValid() )
 	{
 		// Treat this as a disconnect or signout, which is handled somewhere else
 		return;
 	}
 
-	if (!PreviousUser.IsValid() && NewUser.IsValid())
+	if ( !PreviousUser.IsValid() && NewUser.IsValid() )
 	{
 		// Treat this as a signin
-		ULocalPlayer * ControlledLocalPlayer = FindLocalPlayerFromControllerId(GameUserIndex);
+		ULocalPlayer * ControlledLocalPlayer = FindLocalPlayerFromControllerId( GameUserIndex );
 
-		if (ControlledLocalPlayer != NULL && !ControlledLocalPlayer->GetCachedUniqueNetId().IsValid())
+		if ( ControlledLocalPlayer != NULL && !ControlledLocalPlayer->GetCachedUniqueNetId().IsValid() )
 		{
 			// If a player that previously selected "continue without saving" signs into this controller, move them back to welcome screen
 			HandleSignInChangeMessaging();
 		}
-
+		
 		return;
 	}
 
 	// Find the local player currently being controlled by this controller
-	ULocalPlayer * ControlledLocalPlayer = FindLocalPlayerFromControllerId(GameUserIndex);
+	ULocalPlayer * ControlledLocalPlayer	= FindLocalPlayerFromControllerId( GameUserIndex );
 
 	// See if the newly assigned profile is in our local player list
-	ULocalPlayer * NewLocalPlayer = FindLocalPlayerFromUniqueNetId(NewUser);
+	ULocalPlayer * NewLocalPlayer			= FindLocalPlayerFromUniqueNetId( NewUser );
 
 	// If the local player being controlled is not the target of the pairing change, then give them a chance 
 	// to continue controlling the old player with this controller
-	if (ControlledLocalPlayer != nullptr && ControlledLocalPlayer != NewLocalPlayer)
+	if ( ControlledLocalPlayer != nullptr && ControlledLocalPlayer != NewLocalPlayer )
 	{
-		UAmethystGameViewportClient * AmethystViewport = Cast<UAmethystGameViewportClient>(GetGameViewportClient());
+		UAmethystForestViewportClient * AmethystViewport = Cast<UAmethystForestViewportClient>(GetGameViewportClient());
 
-		if (AmethystViewport != nullptr)
+		if ( AmethystViewport != nullptr )
 		{
 			AmethystViewport->ShowDialog(
 				nullptr,
@@ -763,24 +1488,27 @@ void UAmethystGameInstance::HandleControllerPairingChanged(int GameUserIndex, co
 				NSLOCTEXT("ProfileMessages", "PairingChanged", "Your controller has been paired to another profile, would you like to switch to this new profile now? Selecting YES will sign out of the previous profile."),
 				NSLOCTEXT("DialogButtons", "YES", "A - YES"),
 				NSLOCTEXT("DialogButtons", "NO", "B - NO"),
-				FOnClicked::CreateUObject(this, &UAmethystGameInstance::OnPairingUseNewProfile),
-				FOnClicked::CreateUObject(this, &UAmethystGameInstance::OnPairingUsePreviousProfile)
-				);
+				FOnClicked::CreateUObject(this, &UAmethystForestInstance::OnPairingUseNewProfile),
+				FOnClicked::CreateUObject(this, &UAmethystForestInstance::OnPairingUsePreviousProfile)
+			);
 		}
 	}
 #endif
 }
 
-void UAmethystGameInstance::HandleControllerConnectionChange(bool bIsConnection, int32 Unused, int32 GameUserIndex)
+void UAmethystForestInstance::HandleControllerConnectionChange( bool bIsConnection, int32 Unused, int32 GameUserIndex )
 {
-	if (!bIsConnection)
+	UE_LOG(LogOnlineGame, Log, TEXT("UAmethystForestInstance::HandleControllerConnectionChange bIsConnection %d GameUserIndex %d"),
+		bIsConnection, GameUserIndex);
+
+	if(!bIsConnection)
 	{
 		// Controller was disconnected
 
 		// Find the local player associated with this user index
-		ULocalPlayer * LocalPlayer = FindLocalPlayerFromControllerId(GameUserIndex);
+		ULocalPlayer * LocalPlayer = FindLocalPlayerFromControllerId( GameUserIndex );
 
-		if (LocalPlayer == NULL)
+		if ( LocalPlayer == NULL )
 		{
 			return;		// We don't care about players we aren't tracking
 		}
@@ -790,27 +1518,310 @@ void UAmethystGameInstance::HandleControllerConnectionChange(bool bIsConnection,
 	}
 }
 
-FReply UAmethystGameInstance::OnControllerReconnectConfirm()
+FReply UAmethystForestInstance::OnControllerReconnectConfirm()
 {
-	/* TO DO: GameViewportClient
-	UAmethystGameViewportClient * AmethystViewport = Cast<UAmethystGameViewportClient>(GetGameViewportClient());
-	if (AmethystViewport)
+	UAmethystForestViewportClient * AmethystViewport = Cast<UAmethystForestViewportClient>(GetGameViewportClient());
+	if(AmethystViewport)
 	{
 		AmethystViewport->HideDialog();
 	}
-	*/
+
 	return FReply::Handled();
 }
 
-FReply UAmethystGameInstance::OnConfirmGeneric()
+TSharedPtr< const FUniqueNetId > UAmethystForestInstance::GetUniqueNetIdFromControllerId( const int ControllerId )
 {
-	/* TO DO: GameViewportClient
-	UAmethystGameViewportClient * AmethystViewport = Cast<UAmethystGameViewportClient>(GetGameViewportClient());
-	if (AmethystViewport)
+	IOnlineIdentityPtr OnlineIdentityInt = Online::GetIdentityInterface();
+
+	if ( OnlineIdentityInt.IsValid() )
+	{
+		TSharedPtr<const FUniqueNetId> UniqueId = OnlineIdentityInt->GetUniquePlayerId( ControllerId );
+
+		if ( UniqueId.IsValid() )
+		{
+			return UniqueId;
+		}
+	}
+
+	return nullptr;
+}
+
+void UAmethystForestInstance::SetIsOnline(bool bInIsOnline)
+{
+	bIsOnline = bInIsOnline;
+	IOnlineSubsystem* OnlineSub = IOnlineSubsystem::Get();
+
+	if (OnlineSub)
+	{
+		for (int32 i = 0; i < LocalPlayers.Num(); ++i)
+		{
+			ULocalPlayer* LocalPlayer = LocalPlayers[i];
+
+			TSharedPtr<const FUniqueNetId> PlayerId = LocalPlayer->GetPreferredUniqueNetId();
+			if (PlayerId.IsValid())
+			{
+				OnlineSub->SetUsingMultiplayerFeatures(*PlayerId, bIsOnline);
+			}
+		}		
+	}
+}
+
+void UAmethystForestInstance::TravelToSession(const FName& SessionName)
+{
+	// Added to handle failures when joining using quickmatch (handles issue of joining a game that just ended, i.e. during game ending timer)
+	AddNetworkFailureHandlers();
+	ShowLoadingScreen();
+	GotoState(AmethystForestInstanceState::Playing);
+	InternalTravelToSession(SessionName);
+}
+
+void UAmethystForestInstance::SetIgnorePairingChangeForControllerId( const int32 ControllerId )
+{
+	IgnorePairingChangeForControllerId = ControllerId;
+}
+
+bool UAmethystForestInstance::IsLocalPlayerOnline(ULocalPlayer* LocalPlayer)
+{
+	if (LocalPlayer == NULL)
+	{
+		return false;
+	}
+	const auto OnlineSub = IOnlineSubsystem::Get();
+	if(OnlineSub)
+	{
+		const auto IdentityInterface = OnlineSub->GetIdentityInterface();
+		if(IdentityInterface.IsValid())
+		{
+			auto UniqueId = LocalPlayer->GetCachedUniqueNetId();
+			if (UniqueId.IsValid())
+			{
+				const auto LoginStatus = IdentityInterface->GetLoginStatus(*UniqueId);
+				if(LoginStatus == ELoginStatus::LoggedIn)
+				{
+					return true;
+				}
+			}
+		}
+	}
+
+	return false;
+}
+
+bool UAmethystForestInstance::ValidatePlayerForOnlinePlay(ULocalPlayer* LocalPlayer)
+{
+	// Get the viewport
+	UAmethystForestViewportClient * AmethystViewport = Cast<UAmethystForestViewportClient>(GetGameViewportClient());
+
+#if PLATFORM_XBOXONE
+	if (CurrentConnectionStatus != EOnlineServerConnectionStatus::Connected)
+	{
+		// Don't let them play online if they aren't connected to Xbox LIVE
+		if (AmethystViewport != NULL)
+		{
+			const FText Msg				= NSLOCTEXT("NetworkFailures", "ServiceDisconnected", "You must be connected to the Xbox LIVE service to play online.");
+			const FText OKButtonString	= NSLOCTEXT("DialogButtons", "OKAY", "OK");
+
+			AmethystViewport->ShowDialog(
+				NULL,
+				EAmethystDialogType::Generic,
+				Msg,
+				OKButtonString,
+				FText::GetEmpty(),
+				FOnClicked::CreateUObject(this, &UAmethystForestInstance::OnConfirmGeneric),
+				FOnClicked::CreateUObject(this, &UAmethystForestInstance::OnConfirmGeneric)
+			);
+		}
+
+		return false;
+	}
+#endif
+
+	if (!IsLocalPlayerOnline(LocalPlayer))
+	{
+		// Don't let them play online if they aren't online
+		if (AmethystViewport != NULL)
+		{
+			const FText Msg				= NSLOCTEXT("NetworkFailures", "MustBeSignedIn", "You must be signed in to play online");
+			const FText OKButtonString	= NSLOCTEXT("DialogButtons", "OKAY", "OK");
+
+			AmethystViewport->ShowDialog(
+				NULL,
+				EAmethystDialogType::Generic,
+				Msg,
+				OKButtonString,
+				FText::GetEmpty(),
+				FOnClicked::CreateUObject(this, &UAmethystForestInstance::OnConfirmGeneric),
+				FOnClicked::CreateUObject(this, &UAmethystForestInstance::OnConfirmGeneric)
+			);
+		}
+
+		return false;
+	}
+
+	return true;
+}
+
+FReply UAmethystForestInstance::OnConfirmGeneric()
+{
+	UAmethystForestViewportClient * AmethystViewport = Cast<UAmethystForestViewportClient>(GetGameViewportClient());
+	if(AmethystViewport)
 	{
 		AmethystViewport->HideDialog();
 	}
-	*/
 
 	return FReply::Handled();
+}
+
+void UAmethystForestInstance::StartOnlinePrivilegeTask(const IOnlineIdentity::FOnGetUserPrivilegeCompleteDelegate& Delegate, EUserPrivileges::Type Privilege, TSharedPtr< const FUniqueNetId > UserId)
+{
+	WaitMessageWidget = SNew(SAmethystWaitDialog)
+		.MessageText(NSLOCTEXT("NetworkStatus", "CheckingPrivilegesWithServer", "Checking privileges with server.  Please wait..."));
+
+	if (GEngine && GEngine->GameViewport)
+	{
+		UGameViewportClient* const GVC = GEngine->GameViewport;
+		GVC->AddViewportWidgetContent(WaitMessageWidget.ToSharedRef());
+	}
+
+	auto Identity = Online::GetIdentityInterface();
+	if (Identity.IsValid() && UserId.IsValid())
+	{		
+		Identity->GetUserPrivilege(*UserId, Privilege, Delegate);
+	}
+	else
+	{
+		// Can only get away with faking the UniqueNetId here because the delegates don't use it
+		Delegate.ExecuteIfBound(FUniqueNetIdString(), Privilege, (uint32)IOnlineIdentity::EPrivilegeResults::NoFailures);
+	}
+}
+
+void UAmethystForestInstance::CleanupOnlinePrivilegeTask()
+{
+	if (GEngine && GEngine->GameViewport && WaitMessageWidget.IsValid())
+	{
+		UGameViewportClient* const GVC = GEngine->GameViewport;
+		GVC->RemoveViewportWidgetContent(WaitMessageWidget.ToSharedRef());
+	}
+}
+
+void UAmethystForestInstance::DisplayOnlinePrivilegeFailureDialogs(const FUniqueNetId& UserId, EUserPrivileges::Type Privilege, uint32 PrivilegeResults)
+{	
+	// Show warning that the user cannot play due to age restrictions
+	UAmethystForestViewportClient * AmethystViewport = Cast<UAmethystForestViewportClient>(GetGameViewportClient());
+	TWeakObjectPtr<ULocalPlayer> OwningPlayer;
+	if (GEngine)
+	{
+		for (auto It = GEngine->GetLocalPlayerIterator(GetWorld()); It; ++It)
+		{
+			TSharedPtr<const FUniqueNetId> OtherId = (*It)->GetPreferredUniqueNetId();
+			if (OtherId.IsValid())
+			{
+				if (UserId == (*OtherId))
+				{
+					OwningPlayer = *It;
+				}
+			}
+		}
+	}
+	
+	if (AmethystViewport != NULL && OwningPlayer.IsValid())
+	{
+		if ((PrivilegeResults & (uint32)IOnlineIdentity::EPrivilegeResults::AccountTypeFailure) != 0)
+		{
+			IOnlineExternalUIPtr ExternalUI = Online::GetExternalUIInterface();
+			if (ExternalUI.IsValid())
+			{
+				ExternalUI->ShowAccountUpgradeUI(UserId);
+			}
+		}
+		else if ((PrivilegeResults & (uint32)IOnlineIdentity::EPrivilegeResults::RequiredSystemUpdate) != 0)
+		{
+			AmethystViewport->ShowDialog(
+				OwningPlayer.Get(),
+				EAmethystDialogType::Generic,
+				NSLOCTEXT("OnlinePrivilegeResult", "RequiredSystemUpdate", "A required system update is available.  Please upgrade to access online features."),
+				NSLOCTEXT("DialogButtons", "OKAY", "OK"),
+				FText::GetEmpty(),
+				FOnClicked::CreateUObject(this, &UAmethystForestInstance::OnConfirmGeneric),
+				FOnClicked::CreateUObject(this, &UAmethystForestInstance::OnConfirmGeneric)
+				);
+		}
+		else if ((PrivilegeResults & (uint32)IOnlineIdentity::EPrivilegeResults::RequiredPatchAvailable) != 0)
+		{
+			AmethystViewport->ShowDialog(
+				OwningPlayer.Get(),
+				EAmethystDialogType::Generic,
+				NSLOCTEXT("OnlinePrivilegeResult", "RequiredPatchAvailable", "A required game patch is available.  Please upgrade to access online features."),
+				NSLOCTEXT("DialogButtons", "OKAY", "OK"),
+				FText::GetEmpty(),
+				FOnClicked::CreateUObject(this, &UAmethystForestInstance::OnConfirmGeneric),
+				FOnClicked::CreateUObject(this, &UAmethystForestInstance::OnConfirmGeneric)
+				);
+		}
+		else if ((PrivilegeResults & (uint32)IOnlineIdentity::EPrivilegeResults::AgeRestrictionFailure) != 0)
+		{
+			AmethystViewport->ShowDialog(
+				OwningPlayer.Get(),
+				EAmethystDialogType::Generic,
+				NSLOCTEXT("OnlinePrivilegeResult", "AgeRestrictionFailure", "Cannot play due to age restrictions!"),
+				NSLOCTEXT("DialogButtons", "OKAY", "OK"),
+				FText::GetEmpty(),
+				FOnClicked::CreateUObject(this, &UAmethystForestInstance::OnConfirmGeneric),
+				FOnClicked::CreateUObject(this, &UAmethystForestInstance::OnConfirmGeneric)
+				);
+		}
+		else if ((PrivilegeResults & (uint32)IOnlineIdentity::EPrivilegeResults::UserNotFound) != 0)
+		{
+			AmethystViewport->ShowDialog(
+				OwningPlayer.Get(),
+				EAmethystDialogType::Generic,
+				NSLOCTEXT("OnlinePrivilegeResult", "UserNotFound", "Cannot play due invalid user!"),
+				NSLOCTEXT("DialogButtons", "OKAY", "OK"),
+				FText::GetEmpty(),
+				FOnClicked::CreateUObject(this, &UAmethystForestInstance::OnConfirmGeneric),
+				FOnClicked::CreateUObject(this, &UAmethystForestInstance::OnConfirmGeneric)
+				);
+		}
+		else if ((PrivilegeResults & (uint32)IOnlineIdentity::EPrivilegeResults::GenericFailure) != 0)
+		{
+			AmethystViewport->ShowDialog(
+				OwningPlayer.Get(),
+				EAmethystDialogType::Generic,
+				NSLOCTEXT("OnlinePrivilegeResult", "GenericFailure", "Cannot play online.  Check your network connection."),
+				NSLOCTEXT("DialogButtons", "OKAY", "OK"),
+				FText::GetEmpty(),
+				FOnClicked::CreateUObject(this, &UAmethystForestInstance::OnConfirmGeneric),
+				FOnClicked::CreateUObject(this, &UAmethystForestInstance::OnConfirmGeneric)
+				);
+		}
+	}
+}
+
+void UAmethystForestInstance::OnRegisterLocalPlayerComplete(const FUniqueNetId& PlayerId, EOnJoinSessionCompleteResult::Type Result)
+{
+	FinishSessionCreation(Result);
+}
+
+void UAmethystForestInstance::FinishSessionCreation(EOnJoinSessionCompleteResult::Type Result)
+{
+	if (Result == EOnJoinSessionCompleteResult::Success)
+	{
+		// Travel to the specified match URL
+		GetWorld()->ServerTravel(TravelURL);
+	}
+	else
+	{
+		FText ReturnReason = NSLOCTEXT("NetworkErrors", "CreateSessionFailed", "Failed to create session.");
+		FText OKButton = NSLOCTEXT("DialogButtons", "OKAY", "OK");
+		ShowMessageThenGoMain(ReturnReason, OKButton, FText::GetEmpty());
+	}
+}
+
+void UAmethystForestInstance::BeginHostingQuickMatch()
+{
+	ShowLoadingScreen();
+	GotoState(AmethystForestInstanceState::Playing);
+
+	// Travel to the specified match URL
+	GetWorld()->ServerTravel(TEXT("/Game/Maps/Highrise?game=TDM?listen"));	
 }

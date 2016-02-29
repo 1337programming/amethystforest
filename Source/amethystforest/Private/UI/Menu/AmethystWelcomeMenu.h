@@ -1,15 +1,13 @@
-
+// Copyright 1998-2015 Epic Games, Inc. All Rights Reserved.
 #pragma once
 #include "SlateBasics.h"
 #include "SlateExtras.h"
-#include "SViewport.h"
-#include "Classes/AmethystGameInstance.h"
 
 class FAmethystWelcomeMenu : public TSharedFromThis<FAmethystWelcomeMenu>
 {
 public:
 	/** build menu */
-	void Construct(TWeakObjectPtr< class UAmethystGameInstance > InGameInstance);
+	void Construct( TWeakObjectPtr< class UAmethystForestInstance > InGameInstance );
 
 	/** Add the menu to the gameviewport so it becomes visible */
 	void AddToGameViewport();
@@ -18,10 +16,18 @@ public:
 	void RemoveFromGameViewport();
 
 	/**
-	* Called when a user needs to advance from the welcome screen to the main menu.
-	*
-	* @param ControllerIndex The controller index of the player that's advancing.
-	*/
+	 * The delegate function for external login UI closure when a user has signed in.
+	 *
+	 * @param UniqueId The unique Id of the user who just signed in.
+	 * @param ControllerIndex The controller index of the player who just signed in.
+	 */
+	void HandleLoginUIClosed(TSharedPtr<const FUniqueNetId> UniqueId, const int ControllerIndex);
+
+	/**
+	 * Called when a user needs to advance from the welcome screen to the main menu.
+	 *
+	 * @param ControllerIndex The controller index of the player that's advancing.
+	 */
 	void SetControllerAndAdvanceToMainMenu(const int ControllerIndex);
 
 	/** Lock/Unlock controls based*/
@@ -34,11 +40,11 @@ public:
 	{
 		return bControlsLocked;
 	}
-	TWeakObjectPtr< class UAmethystGameInstance > GetGameInstance() { return GameInstance; }
+	TWeakObjectPtr< class UAmethystForestInstance > GetGameInstance() { return GameInstance; }
 
 private:
 	/** Owning game instance */
-	TWeakObjectPtr< class UAmethystGameInstance > GameInstance;
+	TWeakObjectPtr< class UAmethystForestInstance > GameInstance;
 
 	/** Cache the user id that tried to advance, so we can use it again after the confirmation dialog */
 	int PendingControllerIndex;
@@ -51,6 +57,9 @@ private:
 
 	/** Generic Handler for hiding the dialog. */
 	FReply OnConfirmGeneric();
+
+	/** Handler for querying a user's privileges */
+	void OnUserCanPlay(const FUniqueNetId& UserId, EUserPrivileges::Type Privilege, uint32 PrivilegeResults);
 
 	bool bControlsLocked;
 };
