@@ -1,18 +1,16 @@
+// Copyright 1998-2015 Epic Games, Inc. All Rights Reserved.
+
+#include "AmethystForest.h"
+#include "Weapons/AmethystWeapon.h"
+#include "Weapons/AmethystDamageType.h"
+#include "UI/AmethystHUD.h"
+#include "Online/AmethystPlayerState.h"
 
 
-#include "amethystforest.h"
-#include "Classes/Player/AmethystCharacter.h"
-#include "Classes/Player/AmethystCharMovementComponent.h"
-#include "Classes/Player/amethystforestPlayerController.h"
-#include "Classes/Weapon/AmethystDamageType.h"
-#include "Classes/Weapon/AmethystWeapon.h"
-#include "Classes/UI/AmethystHUD.h"
-#include "Classes/Game/amethystforestGameMode.h"
-
-AAmethystCharacter::AAmethystCharacter(const class FObjectInitializer& PCIP)
-	: Super(PCIP.SetDefaultSubobjectClass<UAmethystCharMovementComponent>(ACharacter::CharacterMovementComponentName))
+AAmethystCharacter::AAmethystCharacter(const FObjectInitializer& ObjectInitializer)
+	: Super(ObjectInitializer.SetDefaultSubobjectClass<UAmethystCharacterMovement>(ACharacter::CharacterMovementComponentName))
 {
-	Mesh1P = PCIP.CreateDefaultSubobject<USkeletalMeshComponent>(this, TEXT("PawnMesh1P"));
+	Mesh1P = ObjectInitializer.CreateDefaultSubobject<USkeletalMeshComponent>(this, TEXT("PawnMesh1P"));
 	Mesh1P->AttachParent = GetCapsuleComponent();
 	Mesh1P->bOnlyOwnerSee = true;
 	Mesh1P->bOwnerNoSee = false;
@@ -20,7 +18,6 @@ AAmethystCharacter::AAmethystCharacter(const class FObjectInitializer& PCIP)
 	Mesh1P->bReceivesDecals = false;
 	Mesh1P->MeshComponentUpdateFlag = EMeshComponentUpdateFlag::OnlyTickPoseWhenRendered;
 	Mesh1P->PrimaryComponentTick.TickGroup = TG_PrePhysics;
-	Mesh1P->bChartDistanceFactor = false;
 	Mesh1P->SetCollisionObjectType(ECC_Pawn);
 	Mesh1P->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 	Mesh1P->SetCollisionResponseToAllChannels(ECR_Ignore);
@@ -47,17 +44,6 @@ AAmethystCharacter::AAmethystCharacter(const class FObjectInitializer& PCIP)
 
 	BaseTurnRate = 45.f;
 	BaseLookUpRate = 45.f;
-    
-}
-
-void AAmethystCharacter::BeginPlay()
-{
-    Super::BeginPlay();
-    
-    if (GEngine)
-    {
-        GEngine->AddOnScreenDebugMessage(-1, 5.f, FColor::Blue, TEXT("We are using AmethystCharacter!"));
-    }
 }
 
 void AAmethystCharacter::PostInitializeComponents()
@@ -72,7 +58,7 @@ void AAmethystCharacter::PostInitializeComponents()
 
 	// set initial mesh visibility (3rd person view)
 	UpdatePawnMeshes();
-
+	
 	// create material instance for setting team colors (3rd person view)
 	for (int32 iMat = 0; iMat < GetMesh()->GetNumMaterials(); iMat++)
 	{
@@ -110,17 +96,28 @@ void AAmethystCharacter::PawnClientRestart()
 	// reattach weapon if needed
 	SetCurrentWeapon(CurrentWeapon);
 
+	// set team colors for 1st person view
+	UMaterialInstanceDynamic* Mesh1PMID = Mesh1P->CreateAndSetMaterialInstanceDynamic(0);
+	UpdateTeamColors(Mesh1PMID);
 }
 
 void AAmethystCharacter::PossessedBy(class AController* InController)
 {
 	Super::PossessedBy(InController);
 
+	// [server] as soon as PlayerState is assigned, set team colors of this pawn for local player
+	UpdateTeamColorsAllMIDs();
 }
 
 void AAmethystCharacter::OnRep_PlayerState()
 {
 	Super::OnRep_PlayerState();
+
+	// [client] as soon as PlayerState is assigned, set team colors of this pawn for local player
+	if (PlayerState != NULL)
+	{
+		UpdateTeamColorsAllMIDs();
+	}
 }
 
 FRotator AAmethystCharacter::GetAimOffsets() const
@@ -131,6 +128,30 @@ FRotator AAmethystCharacter::GetAimOffsets() const
 
 	return AimRotLS;
 }
+
+bool AAmethystCharacter::IsEnemyFor(AController* TestPC) const
+{
+	if (TestPC == Controller || TestPC == NULL)
+	{
+		return false;
+	}
+
+	AAmethystPlayerState* TestPlayerState = Cast<AAmethystPlayerState>(TestPC->PlayerState);
+	AAmethystPlayerState* MyPlayerState = Cast<AAmethystPlayerState>(PlayerState);
+
+	bool bIsEnemy = true;
+	if (GetWorld()->GameState && GetWorld()->GameState->GameModeClass)
+	{
+		const AAmethystForestMode* DefGame = GetWorld()->GameState->GameModeClass->GetDefaultObject<AAmethystForestMode>();
+		if (DefGame && MyPlayerState && TestPlayerState)
+		{
+			bIsEnemy = DefGame->CanDealDamage(TestPlayerState, MyPlayerState);
+		}
+	}
+
+	return bIsEnemy;
+}
+
 
 //////////////////////////////////////////////////////////////////////////
 // Meshes
@@ -144,6 +165,19 @@ void AAmethystCharacter::UpdatePawnMeshes()
 
 	GetMesh()->MeshComponentUpdateFlag = bFirstPerson ? EMeshComponentUpdateFlag::OnlyTickPoseWhenRendered : EMeshComponentUpdateFlag::AlwaysTickPoseAndRefreshBones;
 	GetMesh()->SetOwnerNoSee(bFirstPerson);
+}
+
+void AAmethystCharacter::UpdateTeamColors(UMaterialInstanceDynamic* UseMID)
+{
+	if (UseMID)
+	{
+		AAmethystPlayerState* MyPlayerState = Cast<AAmethystPlayerState>(PlayerState);
+		if (MyPlayerState != NULL)
+		{
+			float MaterialParam = (float)MyPlayerState->GetTeamNum();
+			UseMID->SetScalarParameterValue(TEXT("Team Color Index"), MaterialParam);
+		}
+	}
 }
 
 void AAmethystCharacter::OnCameraUpdate(const FVector& CameraLocation, const FRotator& CameraRotation)
@@ -195,9 +229,10 @@ void AAmethystCharacter::KilledBy(APawn* EventInstigator)
 	}
 }
 
+
 float AAmethystCharacter::TakeDamage(float Damage, struct FDamageEvent const& DamageEvent, class AController* EventInstigator, class AActor* DamageCauser)
 {
-	AamethystforestPlayerController* MyPC = Cast<AamethystforestPlayerController>(Controller);
+	AAmethystPlayerController* MyPC = Cast<AAmethystPlayerController>(Controller);
 	if (MyPC && MyPC->HasGodMode())
 	{
 		return 0.f;
@@ -209,8 +244,8 @@ float AAmethystCharacter::TakeDamage(float Damage, struct FDamageEvent const& Da
 	}
 
 	// Modify based on game rules.
-	AamethystforestGameMode* const Game = GetWorld()->GetAuthGameMode<AamethystforestGameMode>();
-	//Damage = Game ? Game->ModifyDamage(Damage, this, DamageEvent, EventInstigator, DamageCauser) : 0.f;
+	AAmethystForestMode* const Game = GetWorld()->GetAuthGameMode<AAmethystForestMode>();
+	Damage = Game ? Game->ModifyDamage(Damage, this, DamageEvent, EventInstigator, DamageCauser) : 0.f;
 
 	const float ActualDamage = Super::TakeDamage(Damage, DamageEvent, EventInstigator, DamageCauser);
 	if (ActualDamage > 0.f)
@@ -229,24 +264,23 @@ float AAmethystCharacter::TakeDamage(float Damage, struct FDamageEvent const& Da
 	}
 
 	return ActualDamage;
-	
 }
 
 
 bool AAmethystCharacter::CanDie(float KillingDamage, FDamageEvent const& DamageEvent, AController* Killer, AActor* DamageCauser) const
 {
-	if (bIsDying										// already dying
+	if ( bIsDying										// already dying
 		|| IsPendingKill()								// already destroyed
 		|| Role != ROLE_Authority						// not authority
 		|| GetWorld()->GetAuthGameMode() == NULL
-        || GetWorld()->GetAuthGameMode()
-		)
+		|| GetWorld()->GetAuthGameMode()->GetMatchState() == MatchState::LeavingMap)	// level transition occurring
 	{
 		return false;
 	}
 
 	return true;
 }
+
 
 bool AAmethystCharacter::Die(float KillingDamage, FDamageEvent const& DamageEvent, AController* Killer, AActor* DamageCauser)
 {
@@ -261,12 +295,16 @@ bool AAmethystCharacter::Die(float KillingDamage, FDamageEvent const& DamageEven
 	UDamageType const* const DamageType = DamageEvent.DamageTypeClass ? DamageEvent.DamageTypeClass->GetDefaultObject<UDamageType>() : GetDefault<UDamageType>();
 	Killer = GetDamageInstigator(Killer, *DamageType);
 
+	AController* const KilledPlayer = (Controller != NULL) ? Controller : Cast<AController>(GetOwner());
+	GetWorld()->GetAuthGameMode<AAmethystForestMode>()->Killed(Killer, KilledPlayer, this, DamageType);
+
 	NetUpdateFrequency = GetDefault<AAmethystCharacter>()->NetUpdateFrequency;
 	GetCharacterMovement()->ForceReplicationUpdate();
 
 	OnDeath(KillingDamage, DamageEvent, Killer ? Killer->GetPawn() : NULL, DamageCauser);
 	return true;
 }
+
 
 void AAmethystCharacter::OnDeath(float KillingDamage, struct FDamageEvent const& DamageEvent, class APawn* PawnInstigator, class AActor* DamageCauser)
 {
@@ -281,14 +319,13 @@ void AAmethystCharacter::OnDeath(float KillingDamage, struct FDamageEvent const&
 
 	if (Role == ROLE_Authority)
 	{
-		ReplicateHit(KillingDamage, DamageEvent, PawnInstigator, DamageCauser, true);
+		ReplicateHit(KillingDamage, DamageEvent, PawnInstigator, DamageCauser, true);	
 
 		// play the force feedback effect on the client player controller
 		APlayerController* PC = Cast<APlayerController>(Controller);
 		if (PC && DamageEvent.DamageTypeClass)
 		{
 			UAmethystDamageType *DamageType = Cast<UAmethystDamageType>(DamageEvent.DamageTypeClass->GetDefaultObject());
-
 			if (DamageType && DamageType->KilledForceFeedback)
 			{
 				PC->ClientPlayForceFeedback(DamageType->KilledForceFeedback, false, "Damage");
@@ -304,7 +341,7 @@ void AAmethystCharacter::OnDeath(float KillingDamage, struct FDamageEvent const&
 
 	// remove all weapons
 	DestroyInventory();
-
+	
 	// switch back to 3rd person view
 	UpdatePawnMeshes();
 
@@ -321,9 +358,7 @@ void AAmethystCharacter::OnDeath(float KillingDamage, struct FDamageEvent const&
 		RunLoopAC->Stop();
 	}
 
-	// disable collisions on capsule
-	GetCapsuleComponent()->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-	GetCapsuleComponent()->SetCollisionResponseToAllChannels(ECR_Ignore);
+
 
 	if (GetMesh())
 	{
@@ -338,12 +373,18 @@ void AAmethystCharacter::OnDeath(float KillingDamage, struct FDamageEvent const&
 	// Ragdoll
 	if (DeathAnimDuration > 0.f)
 	{
-		GetWorldTimerManager().SetTimer(TimerHandle_Respawn, this, &AAmethystCharacter::SetRagdollPhysics, FMath::Min(0.1f, DeathAnimDuration), false);
+		// Use a local timer handle as we don't need to store it for later but we don't need to look for something to clear
+		FTimerHandle TimerHandle;
+		GetWorldTimerManager().SetTimer(TimerHandle, this, &AAmethystCharacter::SetRagdollPhysics, FMath::Min(0.1f, DeathAnimDuration), false);
 	}
 	else
 	{
 		SetRagdollPhysics();
 	}
+
+	// disable collisions on capsule
+	GetCapsuleComponent()->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	GetCapsuleComponent()->SetCollisionResponseToAllChannels(ECR_Ignore);
 }
 
 void AAmethystCharacter::PlayHit(float DamageTaken, struct FDamageEvent const& DamageEvent, class APawn* PawnInstigator, class AActor* DamageCauser)
@@ -357,7 +398,6 @@ void AAmethystCharacter::PlayHit(float DamageTaken, struct FDamageEvent const& D
 		if (PC && DamageEvent.DamageTypeClass)
 		{
 			UAmethystDamageType *DamageType = Cast<UAmethystDamageType>(DamageEvent.DamageTypeClass->GetDefaultObject());
-			
 			if (DamageType && DamageType->HitForceFeedback)
 			{
 				PC->ClientPlayForceFeedback(DamageType->HitForceFeedback, false, "Damage");
@@ -369,8 +409,8 @@ void AAmethystCharacter::PlayHit(float DamageTaken, struct FDamageEvent const& D
 	{
 		ApplyDamageMomentum(DamageTaken, DamageEvent, PawnInstigator, DamageCauser);
 	}
-
-	AamethystforestPlayerController* MyPC = Cast<AamethystforestPlayerController>(Controller);
+	
+	AAmethystPlayerController* MyPC = Cast<AAmethystPlayerController>(Controller);
 	AAmethystHUD* MyHUD = MyPC ? Cast<AAmethystHUD>(MyPC->GetHUD()) : NULL;
 	if (MyHUD)
 	{
@@ -379,7 +419,7 @@ void AAmethystCharacter::PlayHit(float DamageTaken, struct FDamageEvent const& D
 
 	if (PawnInstigator && PawnInstigator != this && PawnInstigator->IsLocallyControlled())
 	{
-		AamethystforestPlayerController* InstigatorPC = Cast<AamethystforestPlayerController>(PawnInstigator->Controller);
+		AAmethystPlayerController* InstigatorPC = Cast<AAmethystPlayerController>(PawnInstigator->Controller);
 		AAmethystHUD* InstigatorHUD = InstigatorPC ? Cast<AAmethystHUD>(InstigatorPC->GetHUD()) : NULL;
 		if (InstigatorHUD)
 		{
@@ -387,6 +427,7 @@ void AAmethystCharacter::PlayHit(float DamageTaken, struct FDamageEvent const& D
 		}
 	}
 }
+
 
 void AAmethystCharacter::SetRagdollPhysics()
 {
@@ -420,18 +461,19 @@ void AAmethystCharacter::SetRagdollPhysics()
 		// hide and set short lifespan
 		TurnOff();
 		SetActorHiddenInGame(true);
-		SetLifeSpan(1.0f);
+		SetLifeSpan( 1.0f );
 	}
 	else
 	{
-		SetLifeSpan(10.0f);
+		SetLifeSpan( 10.0f );
 	}
 }
+
+
 
 void AAmethystCharacter::ReplicateHit(float Damage, struct FDamageEvent const& DamageEvent, class APawn* PawnInstigator, class AActor* DamageCauser, bool bKilled)
 {
 	const float TimeoutTime = GetWorld()->GetTimeSeconds() + 0.5f;
-	/** TO DO: Figure out LastTakeHitInfo
 
 	FDamageEvent const& LastDamageEvent = LastTakeHitInfo.GetDamageEvent();
 	if ((PawnInstigator == LastTakeHitInfo.PawnInstigator.Get()) && (LastDamageEvent.DamageTypeClass == LastTakeHitInfo.DamageTypeClass) && (LastTakeHitTimeTimeout == TimeoutTime))
@@ -450,15 +492,13 @@ void AAmethystCharacter::ReplicateHit(float Damage, struct FDamageEvent const& D
 	LastTakeHitInfo.ActualDamage = Damage;
 	LastTakeHitInfo.PawnInstigator = Cast<AAmethystCharacter>(PawnInstigator);
 	LastTakeHitInfo.DamageCauser = DamageCauser;
-	LastTakeHitInfo.SetDamageEvent(DamageEvent);
+	LastTakeHitInfo.SetDamageEvent(DamageEvent);		
 	LastTakeHitInfo.bKilled = bKilled;
 	LastTakeHitInfo.EnsureReplication();
-	*/
 
 	LastTakeHitTimeTimeout = TimeoutTime;
 }
 
-/** TO DO: Figure out LastTakeHitInfo
 void AAmethystCharacter::OnRep_LastTakeHitInfo()
 {
 	if (LastTakeHitInfo.bKilled)
@@ -470,7 +510,6 @@ void AAmethystCharacter::OnRep_LastTakeHitInfo()
 		PlayHit(LastTakeHitInfo.ActualDamage, LastTakeHitInfo.GetDamageEvent(), LastTakeHitInfo.PawnInstigator.Get(), LastTakeHitInfo.DamageCauser.Get());
 	}
 }
-*/
 
 //Pawn::PlayDying sets this lifespan, but when that function is called on client, dead pawn's role is still SimulatedProxy despite bTearOff being true. 
 void AAmethystCharacter::TornOff()
@@ -488,21 +527,19 @@ void AAmethystCharacter::SpawnDefaultInventory()
 	{
 		return;
 	}
-	
-		// @hack to remove rocket launcher
-		int32 NumWeaponClasses = DefaultInventoryClasses.Num();	
-		for (int32 i = 0; i < NumWeaponClasses; i++)
-		{
-			if (DefaultInventoryClasses[i])
-			{
-				FActorSpawnParameters SpawnInfo;
-                SpawnInfo.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
-				AAmethystWeapon* NewWeapon = GetWorld()->SpawnActor<AAmethystWeapon>(DefaultInventoryClasses[i], SpawnInfo);
-				AddWeapon(NewWeapon);
 
-			}
+	int32 NumWeaponClasses = DefaultInventoryClasses.Num();	
+	for (int32 i = 0; i < NumWeaponClasses; i++)
+	{
+		if (DefaultInventoryClasses[i])
+		{
+			FActorSpawnParameters SpawnInfo;
+			SpawnInfo.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+			AAmethystWeapon* NewWeapon = GetWorld()->SpawnActor<AAmethystWeapon>(DefaultInventoryClasses[i], SpawnInfo);
+			AddWeapon(NewWeapon);
 		}
-	
+	}
+
 	// equip first weapon in inventory
 	if (Inventory.Num() > 0)
 	{
@@ -566,7 +603,7 @@ void AAmethystCharacter::EquipWeapon(AAmethystWeapon* Weapon)
 	{
 		if (Role == ROLE_Authority)
 		{
-			SetCurrentWeapon(Weapon);
+			SetCurrentWeapon(Weapon, CurrentWeapon);
 		}
 		else
 		{
@@ -590,10 +627,10 @@ void AAmethystCharacter::OnRep_CurrentWeapon(AAmethystWeapon* LastWeapon)
 	SetCurrentWeapon(CurrentWeapon, LastWeapon);
 }
 
-void AAmethystCharacter::SetCurrentWeapon(class AAmethystWeapon* NewWeapon, class AAmethystWeapon* LastWeapon)
+void AAmethystCharacter::SetCurrentWeapon(AAmethystWeapon* NewWeapon, AAmethystWeapon* LastWeapon)
 {
 	AAmethystWeapon* LocalLastWeapon = NULL;
-
+	
 	if (LastWeapon != NULL)
 	{
 		LocalLastWeapon = LastWeapon;
@@ -615,9 +652,11 @@ void AAmethystCharacter::SetCurrentWeapon(class AAmethystWeapon* NewWeapon, clas
 	if (NewWeapon)
 	{
 		NewWeapon->SetOwningPawn(this);	// Make sure weapon's MyPawn is pointing back to us. During replication, we can't guarantee APawn::CurrentWeapon will rep after AWeapon::MyPawn!
-		NewWeapon->OnEquip();
+
+		NewWeapon->OnEquip(LastWeapon);
 	}
 }
+
 
 //////////////////////////////////////////////////////////////////////////
 // Weapon usage
@@ -718,7 +757,7 @@ void AAmethystCharacter::UpdateRunSounds(bool bNewRunning)
 			{
 				RunLoopAC->bAutoDestroy = false;
 			}
-
+			
 		}
 		else if (RunLoopAC)
 		{
@@ -814,7 +853,7 @@ void AAmethystCharacter::MoveForward(float Val)
 		// Limit pitch when walking or falling
 		const bool bLimitRotation = (GetCharacterMovement()->IsMovingOnGround() || GetCharacterMovement()->IsFalling());
 		const FRotator Rotation = bLimitRotation ? GetActorRotation() : Controller->GetControlRotation();
-		const FVector Direction = FRotationMatrix(Rotation).GetScaledAxis(EAxis::X);
+		const FVector Direction = FRotationMatrix(Rotation).GetScaledAxis( EAxis::X );
 		AddMovementInput(Direction, Val);
 	}
 }
@@ -823,8 +862,8 @@ void AAmethystCharacter::MoveRight(float Val)
 {
 	if (Val != 0.f)
 	{
-		const FRotator Rotation = GetActorRotation();
-		const FVector Direction = FRotationMatrix(Rotation).GetScaledAxis(EAxis::Y);
+		const FQuat Rotation = GetActorQuat();
+		const FVector Direction = FQuatRotationMatrix(Rotation).GetScaledAxis( EAxis::Y );
 		AddMovementInput(Direction, Val);
 	}
 }
@@ -855,10 +894,9 @@ void AAmethystCharacter::LookUpAtRate(float Val)
 	AddControllerPitchInput(Val * BaseLookUpRate * GetWorld()->GetDeltaSeconds());
 }
 
-
 void AAmethystCharacter::OnStartFire()
 {
-	AamethystforestPlayerController* MyPC = Cast<AamethystforestPlayerController>(Controller);
+	AAmethystPlayerController* MyPC = Cast<AAmethystPlayerController>(Controller);
 	if (MyPC && MyPC->IsGameInputAllowed())
 	{
 		if (IsRunning())
@@ -869,17 +907,14 @@ void AAmethystCharacter::OnStartFire()
 	}
 }
 
-
 void AAmethystCharacter::OnStopFire()
 {
 	StopWeaponFire();
 }
 
-
-
 void AAmethystCharacter::OnStartTargeting()
 {
-	AamethystforestPlayerController* MyPC = Cast<AamethystforestPlayerController>(Controller);
+	AAmethystPlayerController* MyPC = Cast<AAmethystPlayerController>(Controller);
 	if (MyPC && MyPC->IsGameInputAllowed())
 	{
 		if (IsRunning())
@@ -897,7 +932,7 @@ void AAmethystCharacter::OnStopTargeting()
 
 void AAmethystCharacter::OnNextWeapon()
 {
-	AamethystforestPlayerController* MyPC = Cast<AamethystforestPlayerController>(Controller);
+	AAmethystPlayerController* MyPC = Cast<AAmethystPlayerController>(Controller);
 	if (MyPC && MyPC->IsGameInputAllowed())
 	{
 		if (Inventory.Num() >= 2 && (CurrentWeapon == NULL || CurrentWeapon->GetCurrentState() != EWeaponState::Equipping))
@@ -911,7 +946,7 @@ void AAmethystCharacter::OnNextWeapon()
 
 void AAmethystCharacter::OnPrevWeapon()
 {
-	AamethystforestPlayerController* MyPC = Cast<AamethystforestPlayerController>(Controller);
+	AAmethystPlayerController* MyPC = Cast<AAmethystPlayerController>(Controller);
 	if (MyPC && MyPC->IsGameInputAllowed())
 	{
 		if (Inventory.Num() >= 2 && (CurrentWeapon == NULL || CurrentWeapon->GetCurrentState() != EWeaponState::Equipping))
@@ -925,7 +960,7 @@ void AAmethystCharacter::OnPrevWeapon()
 
 void AAmethystCharacter::OnReload()
 {
-	AamethystforestPlayerController* MyPC = Cast<AamethystforestPlayerController>(Controller);
+	AAmethystPlayerController* MyPC = Cast<AAmethystPlayerController>(Controller);
 	if (MyPC && MyPC->IsGameInputAllowed())
 	{
 		if (CurrentWeapon)
@@ -937,7 +972,7 @@ void AAmethystCharacter::OnReload()
 
 void AAmethystCharacter::OnStartRunning()
 {
-	AamethystforestPlayerController* MyPC = Cast<AamethystforestPlayerController>(Controller);
+	AAmethystPlayerController* MyPC = Cast<AAmethystPlayerController>(Controller);
 	if (MyPC && MyPC->IsGameInputAllowed())
 	{
 		if (IsTargeting())
@@ -951,7 +986,7 @@ void AAmethystCharacter::OnStartRunning()
 
 void AAmethystCharacter::OnStartRunningToggle()
 {
-	AamethystforestPlayerController* MyPC = Cast<AamethystforestPlayerController>(Controller);
+	AAmethystPlayerController* MyPC = Cast<AAmethystPlayerController>(Controller);
 	if (MyPC && MyPC->IsGameInputAllowed())
 	{
 		if (IsTargeting())
@@ -969,15 +1004,14 @@ void AAmethystCharacter::OnStopRunning()
 }
 
 bool AAmethystCharacter::IsRunning() const
-{
+{	
 	if (!GetCharacterMovement())
 	{
 		return false;
 	}
-
-	return (bWantsToRun || bWantsToRunToggled) && !GetVelocity().IsZero() && (GetVelocity().GetSafeNormal2D() | GetActorRotation().Vector()) > -0.1;
+	
+	return (bWantsToRun || bWantsToRunToggled) && !GetVelocity().IsZero() && (GetVelocity().GetSafeNormal2D() | GetActorForwardVector()) > -0.1;
 }
-
 
 void AAmethystCharacter::Tick(float DeltaSeconds)
 {
@@ -987,19 +1021,19 @@ void AAmethystCharacter::Tick(float DeltaSeconds)
 	{
 		SetRunning(false, false);
 	}
-	AamethystforestPlayerController* MyPC = Cast<AamethystforestPlayerController>(Controller);
+	AAmethystPlayerController* MyPC = Cast<AAmethystPlayerController>(Controller);
 	if (MyPC && MyPC->HasHealthRegen())
 	{
 		if (this->Health < this->GetMaxHealth())
 		{
-			this->Health += 5 * DeltaSeconds;
+			this->Health +=  5 * DeltaSeconds;
 			if (Health > this->GetMaxHealth())
 			{
 				Health = this->GetMaxHealth();
 			}
 		}
 	}
-
+	
 	if (LowHealthSound && GEngine->UseSound())
 	{
 		if ((this->Health > 0 && this->Health < this->GetMaxHealth() * LowHealthPercentage) && (!LowHealthWarningPlayer || !LowHealthWarningPlayer->IsPlaying()))
@@ -1007,7 +1041,7 @@ void AAmethystCharacter::Tick(float DeltaSeconds)
 			LowHealthWarningPlayer = UGameplayStatics::SpawnSoundAttached(LowHealthSound, GetRootComponent(),
 				NAME_None, FVector(ForceInit), EAttachLocation::KeepRelativeOffset, true);
 			LowHealthWarningPlayer->SetVolumeMultiplier(0.0f);
-		}
+		} 
 		else if ((this->Health > this->GetMaxHealth() * LowHealthPercentage || this->Health < 0) && LowHealthWarningPlayer && LowHealthWarningPlayer->IsPlaying())
 		{
 			LowHealthWarningPlayer->Stop();
@@ -1023,7 +1057,7 @@ void AAmethystCharacter::Tick(float DeltaSeconds)
 
 void AAmethystCharacter::OnStartJump()
 {
-	AamethystforestPlayerController* MyPC = Cast<AamethystforestPlayerController>(Controller);
+	AAmethystPlayerController* MyPC = Cast<AAmethystPlayerController>(Controller);
 	if (MyPC && MyPC->IsGameInputAllowed())
 	{
 		bPressedJump = true;
@@ -1038,34 +1072,30 @@ void AAmethystCharacter::OnStopJump()
 //////////////////////////////////////////////////////////////////////////
 // Replication
 
-void AAmethystCharacter::PreReplication(IRepChangedPropertyTracker & ChangedPropertyTracker)
+void AAmethystCharacter::PreReplication( IRepChangedPropertyTracker & ChangedPropertyTracker )
 {
-	Super::PreReplication(ChangedPropertyTracker);
+	Super::PreReplication( ChangedPropertyTracker );
 
-	/** TO DO: Figure out LastTakeHitInfo
 	// Only replicate this property for a short duration after it changes so join in progress players don't get spammed with fx when joining late
-	DOREPLIFETIME_ACTIVE_OVERRIDE(AAmethystCharacter, LastTakeHitInfo, GetWorld() && GetWorld()->GetTimeSeconds() < LastTakeHitTimeTimeout);
-	*/
+	DOREPLIFETIME_ACTIVE_OVERRIDE( AAmethystCharacter, LastTakeHitInfo, GetWorld() && GetWorld()->GetTimeSeconds() < LastTakeHitTimeTimeout );
 }
 
-void AAmethystCharacter::GetLifetimeReplicatedProps(TArray< FLifetimeProperty > & OutLifetimeProps) const
+void AAmethystCharacter::GetLifetimeReplicatedProps( TArray< FLifetimeProperty > & OutLifetimeProps ) const
 {
-	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
+	Super::GetLifetimeReplicatedProps( OutLifetimeProps );
 
 	// only to local owner: weapon change requests are locally instigated, other clients don't need it
-	DOREPLIFETIME_CONDITION(AAmethystCharacter, Inventory, COND_OwnerOnly);
+	DOREPLIFETIME_CONDITION( AAmethystCharacter, Inventory,			COND_OwnerOnly );
 
 	// everyone except local owner: flag change is locally instigated
-	DOREPLIFETIME_CONDITION(AAmethystCharacter, bIsTargeting, COND_SkipOwner);
-	DOREPLIFETIME_CONDITION(AAmethystCharacter, bWantsToRun, COND_SkipOwner);
+	DOREPLIFETIME_CONDITION( AAmethystCharacter, bIsTargeting,		COND_SkipOwner );
+	DOREPLIFETIME_CONDITION( AAmethystCharacter, bWantsToRun,		COND_SkipOwner );
 
-	/** TO DO: Figure out LastTakeHitInfo
-	DOREPLIFETIME_CONDITION(AAmethystCharacter, LastTakeHitInfo, COND_Custom);
-	*/
+	DOREPLIFETIME_CONDITION( AAmethystCharacter, LastTakeHitInfo,	COND_Custom );
 
 	// everyone
-	DOREPLIFETIME(AAmethystCharacter, CurrentWeapon);
-	DOREPLIFETIME(AAmethystCharacter, Health);
+	DOREPLIFETIME( AAmethystCharacter, CurrentWeapon );
+	DOREPLIFETIME( AAmethystCharacter, Health );
 }
 
 AAmethystWeapon* AAmethystCharacter::GetWeapon() const
@@ -1085,14 +1115,12 @@ AAmethystWeapon* AAmethystCharacter::GetInventoryWeapon(int32 index) const
 
 USkeletalMeshComponent* AAmethystCharacter::GetPawnMesh() const
 {
-    if (IsFirstPerson()) return Mesh1P;
-    return GetMesh();
+	return IsFirstPerson() ? Mesh1P : GetMesh();
 }
 
-USkeletalMeshComponent* AAmethystCharacter::GetSpecifcPawnMesh(bool WantFirstPerson) const
+USkeletalMeshComponent* AAmethystCharacter::GetSpecifcPawnMesh( bool WantFirstPerson ) const
 {
-    if (WantFirstPerson) return Mesh1P;
-    return GetMesh();
+	return WantFirstPerson == true  ? Mesh1P : GetMesh();
 }
 
 FName AAmethystCharacter::GetWeaponAttachPoint() const
@@ -1138,4 +1166,12 @@ bool AAmethystCharacter::IsAlive() const
 float AAmethystCharacter::GetLowHealthPercentage() const
 {
 	return LowHealthPercentage;
+}
+
+void AAmethystCharacter::UpdateTeamColorsAllMIDs()
+{
+	for (int32 i = 0; i < MeshMIDs.Num(); ++i)
+	{
+		UpdateTeamColors(MeshMIDs[i]);
+	}
 }

@@ -1,5 +1,6 @@
+// Copyright 1998-2015 Epic Games, Inc. All Rights Reserved.
 
-#include "amethystforest.h"
+#include "AmethystForest.h"
 #include "AmethystOptionsWidgetStyle.h"
 
 FAmethystOptionsStyle::FAmethystOptionsStyle()
@@ -14,8 +15,8 @@ const FName FAmethystOptionsStyle::TypeName(TEXT("FAmethystOptionsStyle"));
 
 const FAmethystOptionsStyle& FAmethystOptionsStyle::GetDefault()
 {
-    static FAmethystOptionsStyle Default;
-    return Default;
+	static FAmethystOptionsStyle Default;
+	return Default;
 }
 
 void FAmethystOptionsStyle::GetResources(TArray<const FSlateBrush*>& OutBrushes) const
@@ -23,8 +24,8 @@ void FAmethystOptionsStyle::GetResources(TArray<const FSlateBrush*>& OutBrushes)
 }
 
 
-UAmethystOptionsWidgetStyle::UAmethystOptionsWidgetStyle(const class FObjectInitializer& PCIP)
-: Super(PCIP)
+UAmethystOptionsWidgetStyle::UAmethystOptionsWidgetStyle( const FObjectInitializer& ObjectInitializer )
+	: Super(ObjectInitializer)
 {
-    
+	
 }

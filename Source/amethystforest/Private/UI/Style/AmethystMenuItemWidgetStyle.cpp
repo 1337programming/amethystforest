@@ -1,5 +1,6 @@
+// Copyright 1998-2015 Epic Games, Inc. All Rights Reserved.
 
-#include "amethystforest.h"
+#include "AmethystForest.h"
 #include "AmethystMenuItemWidgetStyle.h"
 
 FAmethystMenuItemStyle::FAmethystMenuItemStyle()
@@ -14,20 +15,20 @@ const FName FAmethystMenuItemStyle::TypeName(TEXT("FAmethystMenuItemStyle"));
 
 const FAmethystMenuItemStyle& FAmethystMenuItemStyle::GetDefault()
 {
-    static FAmethystMenuItemStyle Default;
-    return Default;
+	static FAmethystMenuItemStyle Default;
+	return Default;
 }
 
 void FAmethystMenuItemStyle::GetResources(TArray<const FSlateBrush*>& OutBrushes) const
 {
-    OutBrushes.Add(&BackgroundBrush);
-    OutBrushes.Add(&LeftArrowImage);
-    OutBrushes.Add(&RightArrowImage);
+	OutBrushes.Add(&BackgroundBrush);
+	OutBrushes.Add(&LeftArrowImage);
+	OutBrushes.Add(&RightArrowImage);
 }
 
 
-UAmethystMenuItemWidgetStyle::UAmethystMenuItemWidgetStyle(const class FObjectInitializer& PCIP)
-: Super(PCIP)
+UAmethystMenuItemWidgetStyle::UAmethystMenuItemWidgetStyle( const FObjectInitializer& ObjectInitializer )
+	: Super(ObjectInitializer)
 {
-    
+	
 }
